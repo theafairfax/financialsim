@@ -316,11 +316,19 @@ def percentile_summary(net_worth: np.ndarray, percentiles=(5, 25, 50, 75, 95)) -
     return {p: np.percentile(net_worth, p, axis=0) for p in percentiles}
 
 
-def deflate_to_real(values: np.ndarray, ages: List[int], inflation_rate: float) -> np.ndarray:
-    """Converts nominal dollar values into 'today's dollars' (using ages[0]
-    as the base year), dividing by compound inflation. Works for 1D
-    (n_years,) or 2D (n_sims, n_years) arrays -- the inflation factor
-    broadcasts along the last axis."""
+def deflate_to_real(values, ages, inflation_rate):
     base_age = ages[0]
     factors = np.array([(1 + inflation_rate) ** (a - base_age) for a in ages])
+    
+    # Check dimensions and reshape factors for broadcasting
+    if values.ndim == 3:
+        # values shape: (simulations, ages, assets) -> shape factors to (1, ages, 1)
+        factors = factors[np.newaxis, :, np.newaxis]
+    elif values.ndim == 2:
+        # values shape: (simulations, ages) or (ages, assets)
+        if values.shape[0] == len(ages):
+            factors = factors[:, np.newaxis]
+        else:
+            factors = factors[np.newaxis, :]
+
     return values / factors
