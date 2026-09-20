@@ -186,7 +186,7 @@ def run_monte_carlo(config):
     for i,a in enumerate(assets):
         balances[:,0,i]=a.initial_balance
         bases[:,0,i]=a.initial_balance if a.account_type=="taxable" and a.cost_basis is None else (a.cost_basis or 0.0)
-    prop=np.zeros((ns,ny,nr)); mort=np.zeros((ns,ny,nr)); equity=np.zeros((ns,ny,nr)); re_cash=np.zeros((ns,ny,nr))
+    prop=np.zeros((ns,ny,nr)); mort=np.zeros((ns,ny,nr)); equity=np.zeros((ns,ny,nr)); re_cash=np.zeros((ns,ny,nr)); re_interest=np.zeros((ns,ny,nr)); re_principal=np.zeros((ns,ny,nr))
     for j,r in enumerate(real_estate):
         prop[:,0,j]=r.property_value; mort[:,0,j]=min(r.mortgage_balance,r.property_value); equity[:,0,j]=prop[:,0,j]-mort[:,0,j]
     inc=np.array([build_income_schedule(config,ages)[a] for a in ages]); exp=np.array([build_expense_schedule(config,ages)[a] for a in ages]); large_map=build_large_expense_map(config)
@@ -205,6 +205,8 @@ def run_monte_carlo(config):
             prev=mort[:,t-1,j] if t>0 else mort[:,0,j]
             new_bal, interest_paid, principal_paid, debt_service=_amortize_one_year(prev,r.mortgage_balance,r.mortgage_rate,r.mortgage_term_years)
             mort[:,t,j]=new_bal
+            re_interest[:,t,j]=interest_paid
+            re_principal[:,t,j]=principal_paid
             rent=r.annual_rent*((1+config.expense_inflation)**t)*(1-r.vacancy_rate)
             carrying=prop[:,t,j]*(r.property_tax_rate+r.maintenance_rate)+r.annual_insurance*((1+config.expense_inflation)**t)+debt_service
             re_cash[:,t,j]=rent-carrying
@@ -214,7 +216,7 @@ def run_monte_carlo(config):
         leftover=gross*(1-config.tax_rate)-exp[t]-large[t]+(re_cash[:,t,:].sum(axis=1) if nr else 0.0)
         _allocate_and_withdraw(balances,bases,t,leftover,assets,age,config)
         nw[:,t]=balances[:,t,:].sum(axis=1)+(equity[:,t,:].sum(axis=1) if nr else 0.0)
-    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash}
+    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
 
 def percentile_summary(net_worth,percentiles=(5,25,50,75,95)):
     return {p:np.percentile(net_worth,p,axis=0) for p in percentiles}
