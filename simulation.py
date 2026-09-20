@@ -110,6 +110,19 @@ def _mortgage_payment(balance, annual_rate, term_years):
     if r==0: return balance/n
     return balance*r/(1-(1+r)**(-n))
 
+def _amortize_one_year(balance, original_balance, annual_rate, term_years):
+    payment=_mortgage_payment(original_balance,annual_rate,term_years)
+    bal=balance.copy(); interest_paid=np.zeros_like(bal); principal_paid=np.zeros_like(bal)
+    r=annual_rate/12.0
+    for _ in range(12):
+        interest=bal*r
+        actual=np.minimum(bal+interest,payment)
+        principal=np.minimum(bal,np.maximum(actual-interest,0.0))
+        interest_paid+=np.minimum(interest,actual)
+        principal_paid+=principal
+        bal=np.maximum(bal-principal,0.0)
+    return bal, interest_paid, principal_paid, interest_paid+principal_paid
+
 def _allocate_positive(balances,bases,t,leftover,assets):
     n_sims=balances.shape[0]; desired=np.zeros((n_sims,len(assets)))
     for i,a in enumerate(assets): desired[:,i]=leftover*a.allocation_pct
@@ -188,11 +201,14 @@ def run_monte_carlo(config):
             for j,r in enumerate(real_estate):
                 z=np.clip(r.market_beta,-0.999,0.999)*market[:,t]+np.sqrt(max(1-r.market_beta*r.market_beta,0))*rng.normal(size=ns)
                 prop[:,t,j]=prop[:,t-1,j]*(1+_lognormal_simple_return(rng,r.appreciation_rate,r.appreciation_volatility,z))
-                prev=mort[:,t-1,j]; monthly=_mortgage_payment(r.mortgage_balance,r.mortgage_rate,r.mortgage_term_years)
-                annual_pay=np.minimum(prev,monthly*12); interest=np.minimum(prev,prev*r.mortgage_rate); principal=np.minimum(prev,np.maximum(annual_pay-interest,0)); mort[:,t,j]=np.maximum(prev-principal,0)
-                rent=r.annual_rent*((1-config.expense_inflation)**0 + (1+config.expense_inflation)**t)*(1-r.vacancy_rate)
-                carrying=prop[:,t,j]*(r.property_tax_rate+r.maintenance_rate)+r.annual_insurance*((1+config.expense_inflation)**t)+annual_pay
-                re_cash[:,t,j]=rent-carrying; equity[:,t,j]=prop[:,t,j]-mort[:,t,j]
+        for j,r in enumerate(real_estate):
+            prev=mort[:,t-1,j] if t>0 else mort[:,0,j]
+            new_bal, interest_paid, principal_paid, debt_service=_amortize_one_year(prev,r.mortgage_balance,r.mortgage_rate,r.mortgage_term_years)
+            mort[:,t,j]=new_bal
+            rent=r.annual_rent*((1+config.expense_inflation)**t)*(1-r.vacancy_rate)
+            carrying=prop[:,t,j]*(r.property_tax_rate+r.maintenance_rate)+r.annual_insurance*((1+config.expense_inflation)**t)+debt_service
+            re_cash[:,t,j]=rent-carrying
+            equity[:,t,j]=prop[:,t,j]-mort[:,t,j]
         gross=np.full(ns,inc[t])
         if config.income_volatility>0: gross=np.maximum(gross*(1+rng.normal(0,config.income_volatility,ns)),0.0)
         leftover=gross*(1-config.tax_rate)-exp[t]-large[t]+(re_cash[:,t,:].sum(axis=1) if nr else 0.0)
