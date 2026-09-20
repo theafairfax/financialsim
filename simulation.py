@@ -1,334 +1,229 @@
-"""
-simulation.py
---------------
-Core Monte Carlo simulation engine for the Lifetime Financial Simulator.
-
-This module is UI-agnostic: it exposes plain dataclasses for configuration
-and a single entry point, `run_monte_carlo`, that returns numpy arrays
-describing net worth and per-asset balances across many simulated futures.
-"""
-
+"""Core Monte Carlo engine for the Lifetime Financial Simulator."""
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 import numpy as np
 
-
-# --------------------------------------------------------------------------
-# Configuration objects
-# --------------------------------------------------------------------------
-
 @dataclass
 class IncomeChange:
-    """A discrete change to annual (gross) income starting at a given age
-    (e.g. a promotion, a career switch, a layoff, retirement)."""
     age: int
     new_annual_income: float
     description: str = ""
 
-
 @dataclass
 class ExpenseChange:
-    """A discrete change to the recurring annual expense *baseline* starting
-    at a given age (e.g. relocating to a more/less expensive city, paying
-    off a mortgage, kids leaving home). Inflation continues to compound
-    on top of the new baseline from this age forward."""
     age: int
     new_annual_expenses: float
     description: str = ""
 
-
 @dataclass
 class LargeExpense:
-    """A one-time large expense hitting at a specific age
-    (e.g. house down payment, wedding, tuition, medical event)."""
     age: int
     amount: float
     description: str = ""
 
-
 @dataclass
 class AssetClass:
-    """A savings/investment vehicle the user allocates leftover cash flow to.
-
-    allocation_pct: fraction (0-1) of each year's positive leftover cash flow
-        that is contributed to this asset. Across all assets these should
-        sum to ~1.0 (the simulation normalizes them if they don't).
-    expected_return / volatility: mean and standard deviation of the
-        asset's annual return, used to draw a random return each
-        simulated year (Monte Carlo).
-    liquidity: "liquid" assets are drawn down first to cover shortfalls
-        (years where expenses exceed income); "illiquid" assets
-        (e.g. real estate, retirement accounts) are only tapped once all
-        liquid assets are exhausted, mimicking real-world penalties /
-        difficulty accessing that capital early.
-    annual_contribution_cap: optional ceiling (in dollars) on how much can
-        be contributed to this asset in a single year, mirroring real
-        contribution limits on tax-advantaged accounts (e.g. an IRA).
-        Amounts above the cap "overflow" and are redistributed to
-        uncapped assets proportional to their allocation share. None
-        means unlimited.
-    """
     name: str
     initial_balance: float
     allocation_pct: float
     expected_return: float
     volatility: float
-    liquidity: str = "liquid"  # "liquid" or "illiquid"
+    liquidity: str = "liquid"
     annual_contribution_cap: Optional[float] = None
+    account_type: str = "taxable"  # cash, taxable, tax_deferred, tax_free
+    market_beta: float = 0.7
+    capital_gains_tax_rate: Optional[float] = None
+    cost_basis: Optional[float] = None
 
+@dataclass
+class RealEstateAsset:
+    name: str
+    property_value: float
+    mortgage_balance: float
+    mortgage_rate: float
+    mortgage_term_years: int
+    allocation_pct: float = 0.0
+    appreciation_rate: float = 0.03
+    appreciation_volatility: float = 0.08
+    market_beta: float = 0.35
+    annual_rent: float = 0.0
+    vacancy_rate: float = 0.05
+    property_tax_rate: float = 0.01
+    annual_insurance: float = 0.0
+    maintenance_rate: float = 0.01
 
 @dataclass
 class SimulationConfig:
     start_age: int
     end_age: int
-
     base_income: float
-    income_growth_rate: float = 0.02      # organic annual raise, applied between explicit changes
+    income_growth_rate: float = 0.02
     income_changes: List[IncomeChange] = field(default_factory=list)
-    income_volatility: float = 0.0        # year-to-year income randomness (job loss / bonus risk)
-    tax_rate: float = 0.0                 # flat effective tax rate applied to gross income
-
+    income_volatility: float = 0.0
+    tax_rate: float = 0.0
+    ordinary_withdrawal_tax_rate: Optional[float] = None
+    capital_gains_tax_rate: float = 0.15
+    early_withdrawal_penalty_rate: float = 0.10
     base_expenses: float = 0.0
     expense_inflation: float = 0.03
     expense_changes: List[ExpenseChange] = field(default_factory=list)
     large_expenses: List[LargeExpense] = field(default_factory=list)
-
     assets: List[AssetClass] = field(default_factory=list)
-
+    real_estate: List[RealEstateAsset] = field(default_factory=list)
+    market_autocorrelation: float = 0.25
     num_simulations: int = 1000
     seed: Optional[int] = 42
 
-
-# --------------------------------------------------------------------------
-# Schedule builders (deterministic timelines keyed by age)
-# --------------------------------------------------------------------------
-
-def build_income_schedule(config: SimulationConfig, ages: List[int]) -> Dict[int, float]:
-    """Returns {age: gross_annual_income_that_year} before applying
-    year-to-year volatility or tax. Explicit income_changes override the
-    organic growth trajectory starting at their given age; growth resumes
-    from the new value afterward."""
-    changes_by_age = {c.age: c.new_annual_income for c in config.income_changes}
-    schedule = {}
-    current = config.base_income
-    for i, age in enumerate(ages):
-        if age in changes_by_age:
-            current = changes_by_age[age]
-        elif i > 0:
-            current = current * (1 + config.income_growth_rate)
-        schedule[age] = current
-    return schedule
-
-
-def build_expense_schedule(config: SimulationConfig, ages: List[int]) -> Dict[int, float]:
-    """Returns {age: recurring_non_redeemable_expenses_that_year}, growing
-    with inflation. Explicit expense_changes rebase the baseline starting
-    at their given age (e.g. moving to a higher cost-of-living area);
-    inflation continues to compound on top of the new baseline afterward."""
-    changes_by_age = {c.age: c.new_annual_expenses for c in config.expense_changes}
-    schedule = {}
-    current = config.base_expenses
-    for i, age in enumerate(ages):
-        if age in changes_by_age:
-            current = changes_by_age[age]
-        elif i > 0:
-            current = current * (1 + config.expense_inflation)
-        schedule[age] = current
-    return schedule
-
-
-def build_large_expense_map(config: SimulationConfig) -> Dict[int, float]:
-    """Returns {age: total_lump_sum_expense_that_year}."""
-    out: Dict[int, float] = {}
-    for exp in config.large_expenses:
-        out[exp.age] = out.get(exp.age, 0.0) + exp.amount
+def build_income_schedule(config, ages):
+    changes={c.age:c.new_annual_income for c in config.income_changes}; out={}; cur=config.base_income
+    for i,age in enumerate(ages):
+        if age in changes: cur=changes[age]
+        elif i>0: cur*=1+config.income_growth_rate
+        out[age]=cur
     return out
 
+def build_expense_schedule(config, ages):
+    changes={c.age:c.new_annual_expenses for c in config.expense_changes}; out={}; cur=config.base_expenses
+    for i,age in enumerate(ages):
+        if age in changes: cur=changes[age]
+        elif i>0: cur*=1+config.expense_inflation
+        out[age]=cur
+    return out
 
-# --------------------------------------------------------------------------
-# Allocation / withdrawal logic
-# --------------------------------------------------------------------------
+def build_large_expense_map(config):
+    out={}
+    for e in config.large_expenses: out[e.age]=out.get(e.age,0.0)+e.amount
+    return out
 
-def _allocate_positive(balances: np.ndarray, t: int, leftover_pos: np.ndarray,
-                        assets: List[AssetClass]) -> None:
-    """Distributes positive leftover cash flow across assets by
-    allocation_pct, respecting each asset's optional annual contribution
-    cap. Any amount that would exceed a cap "overflows" and is
-    redistributed across uncapped assets proportional to their relative
-    allocation share. If every asset is capped and contributions still
-    exceed total capacity, the remainder is simply not invested that year
-    (mirrors real life: money with nowhere tax-advantaged to go sits idle
-    or must be spent/invested outside the modeled accounts)."""
-    n_sims = balances.shape[0]
-    n_assets = len(assets)
-    desired = np.zeros((n_sims, n_assets))
-    for i, a in enumerate(assets):
-        desired[:, i] = leftover_pos * a.allocation_pct
+def _lognormal_simple_return(rng, mean, vol, z):
+    if vol <= 0: return np.full_like(z, mean, dtype=float)
+    gross_mean=max(1.0+mean,1e-9)
+    sigma2=np.log(1.0+(vol*vol)/(gross_mean*gross_mean))
+    sigma=np.sqrt(max(sigma2,0.0))
+    mu=np.log(gross_mean)-0.5*sigma2
+    return np.exp(mu+sigma*z)-1.0
 
-    final_contrib = desired.copy()
-    overflow = np.zeros(n_sims)
-    uncapped_idx = []
-    uncapped_alloc_sum = 0.0
+def _mortgage_payment(balance, annual_rate, term_years):
+    n=max(int(term_years*12),1)
+    if balance<=0: return 0.0
+    r=annual_rate/12.0
+    if r==0: return balance/n
+    return balance*r/(1-(1+r)**(-n))
 
-    for i, a in enumerate(assets):
+def _amortize_one_year(balance, original_balance, annual_rate, term_years):
+    payment=_mortgage_payment(original_balance,annual_rate,term_years)
+    bal=balance.copy(); interest_paid=np.zeros_like(bal); principal_paid=np.zeros_like(bal)
+    r=annual_rate/12.0
+    for _ in range(12):
+        interest=bal*r
+        actual=np.minimum(bal+interest,payment)
+        principal=np.minimum(bal,np.maximum(actual-interest,0.0))
+        interest_paid+=np.minimum(interest,actual)
+        principal_paid+=principal
+        bal=np.maximum(bal-principal,0.0)
+    return bal, interest_paid, principal_paid, interest_paid+principal_paid
+
+def _allocate_positive(balances,bases,t,leftover,assets):
+    n_sims=balances.shape[0]; desired=np.zeros((n_sims,len(assets)))
+    for i,a in enumerate(assets): desired[:,i]=leftover*a.allocation_pct
+    final=desired.copy(); overflow=np.zeros(n_sims); uncapped=[]; share_sum=0.0
+    for i,a in enumerate(assets):
         if a.annual_contribution_cap is not None:
-            capped_amt = np.minimum(desired[:, i], a.annual_contribution_cap)
-            overflow += desired[:, i] - capped_amt
-            final_contrib[:, i] = capped_amt
+            x=np.minimum(desired[:,i],a.annual_contribution_cap); overflow+=desired[:,i]-x; final[:,i]=x
+        else: uncapped.append(i); share_sum+=a.allocation_pct
+    if uncapped and overflow.any():
+        for i in uncapped: final[:,i]+=overflow*((assets[i].allocation_pct/share_sum) if share_sum>0 else 1/len(uncapped))
+    for i in range(len(assets)):
+        balances[:,t,i]+=final[:,i]
+        if assets[i].account_type=="taxable": bases[:,t,i]+=final[:,i]
+
+def _net_cash_from_gross(asset,gross,balance,basis,age,config):
+    if asset.account_type=="tax_deferred":
+        rate=config.ordinary_withdrawal_tax_rate if config.ordinary_withdrawal_tax_rate is not None else config.tax_rate
+        if age<59.5: rate+=config.early_withdrawal_penalty_rate
+        return gross*np.maximum(0.0,1.0-rate)
+    if asset.account_type=="taxable" and balance>0:
+        gain_fraction=max((balance-basis)/balance,0.0)
+        cg=asset.capital_gains_tax_rate if asset.capital_gains_tax_rate is not None else config.capital_gains_tax_rate
+        return gross*(1.0-gain_fraction*cg)
+    return gross
+
+def _withdraw_for_shortfall(balances,bases,t,shortfall,mask,assets,age,config):
+    order=sorted(range(len(assets)),key=lambda i:0 if assets[i].liquidity=="liquid" else 1); rem=shortfall.copy()
+    for i in order:
+        bal=np.maximum(balances[:,t,i],0.0); bas=np.maximum(bases[:,t,i],0.0)
+        if not np.any((rem>0)&mask& (bal>0)): continue
+        if assets[i].account_type=="tax_deferred":
+            rate=config.ordinary_withdrawal_tax_rate if config.ordinary_withdrawal_tax_rate is not None else config.tax_rate
+            if age<59.5: rate+=config.early_withdrawal_penalty_rate
+            net_factor=max(1.0-rate,1e-9); gross=np.minimum(bal,rem/net_factor); net=gross*net_factor
+        elif assets[i].account_type=="taxable":
+            gain_frac=np.where(bal>0,np.maximum((bal-bas)/bal,0.0),0.0)
+            cg=assets[i].capital_gains_tax_rate if assets[i].capital_gains_tax_rate is not None else config.capital_gains_tax_rate
+            net_factor=np.maximum(1.0-gain_frac*cg,1e-9); gross=np.minimum(bal,rem/net_factor); net=gross*net_factor
+            ratio=np.where(bal>0,np.minimum(gross/bal,1.0),0.0); bases[:,t,i]-=bas*ratio
         else:
-            uncapped_idx.append(i)
-            uncapped_alloc_sum += a.allocation_pct
+            gross=np.minimum(bal,rem); net=gross
+        gross=np.where(mask,gross,0.0); net=np.where(mask,net,0.0)
+        balances[:,t,i]-=gross; rem=np.maximum(rem-net,0.0)
+    if order and rem.any(): balances[:,t,order[0]]-=rem
 
-    if uncapped_idx and overflow.any():
-        for i in uncapped_idx:
-            share = (assets[i].allocation_pct / uncapped_alloc_sum) if uncapped_alloc_sum > 0 else (1.0 / len(uncapped_idx))
-            final_contrib[:, i] += overflow * share
+def _allocate_and_withdraw(balances,bases,t,leftover,assets,age,config):
+    pos=np.where(leftover>0,leftover,0.0)
+    if pos.any(): _allocate_positive(balances,bases,t,pos,assets)
+    neg=leftover<0
+    if neg.any(): _withdraw_for_shortfall(balances,bases,t,np.where(neg,-leftover,0.0),neg,assets,age,config)
 
-    for i in range(n_assets):
-        balances[:, t, i] += final_contrib[:, i]
+def run_monte_carlo(config):
+    ages=list(range(config.start_age,config.end_age+1)); ny=len(ages); ns=max(1,int(config.num_simulations))
+    assets=list(config.assets) if config.assets else [AssetClass("Cash",0.0,1.0,0.0,0.0,account_type="cash",market_beta=0.0)]
+    real_estate=list(config.real_estate)
+    total_alloc=sum(a.allocation_pct for a in assets)
+    if total_alloc>0 and abs(total_alloc-1.0)>1e-9:
+        assets=[AssetClass(a.name,a.initial_balance,a.allocation_pct/total_alloc,a.expected_return,a.volatility,a.liquidity,a.annual_contribution_cap,a.account_type,a.market_beta,a.capital_gains_tax_rate,a.cost_basis) for a in assets]
+    rng=np.random.default_rng(config.seed); na=len(assets); nr=len(real_estate)
+    balances=np.zeros((ns,ny,na)); bases=np.zeros_like(balances)
+    for i,a in enumerate(assets):
+        balances[:,0,i]=a.initial_balance
+        bases[:,0,i]=a.initial_balance if a.account_type=="taxable" and a.cost_basis is None else (a.cost_basis or 0.0)
+    prop=np.zeros((ns,ny,nr)); mort=np.zeros((ns,ny,nr)); equity=np.zeros((ns,ny,nr)); re_cash=np.zeros((ns,ny,nr)); re_interest=np.zeros((ns,ny,nr)); re_principal=np.zeros((ns,ny,nr))
+    for j,r in enumerate(real_estate):
+        prop[:,0,j]=r.property_value; mort[:,0,j]=min(r.mortgage_balance,r.property_value); equity[:,0,j]=prop[:,0,j]-mort[:,0,j]
+    inc=np.array([build_income_schedule(config,ages)[a] for a in ages]); exp=np.array([build_expense_schedule(config,ages)[a] for a in ages]); large_map=build_large_expense_map(config)
+    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc*(1-config.tax_rate); nw=np.zeros((ns,ny)); market=np.zeros((ns,ny))
+    phi=float(np.clip(config.market_autocorrelation,-0.95,0.95))
+    for t,age in enumerate(ages):
+        if t>0:
+            eps=rng.normal(size=ns); market[:,t]=phi*market[:,t-1]+np.sqrt(max(1-phi*phi,0))*eps
+            for i,a in enumerate(assets):
+                z=np.clip(a.market_beta,-0.999,0.999)*market[:,t]+np.sqrt(max(1-a.market_beta*a.market_beta,0))*rng.normal(size=ns)
+                balances[:,t,i]=balances[:,t-1,i]*(1+_lognormal_simple_return(rng,a.expected_return,a.volatility,z)); bases[:,t,i]=bases[:,t-1,i]
+            for j,r in enumerate(real_estate):
+                z=np.clip(r.market_beta,-0.999,0.999)*market[:,t]+np.sqrt(max(1-r.market_beta*r.market_beta,0))*rng.normal(size=ns)
+                prop[:,t,j]=prop[:,t-1,j]*(1+_lognormal_simple_return(rng,r.appreciation_rate,r.appreciation_volatility,z))
+        for j,r in enumerate(real_estate):
+            prev=mort[:,t-1,j] if t>0 else mort[:,0,j]
+            new_bal, interest_paid, principal_paid, debt_service=_amortize_one_year(prev,r.mortgage_balance,r.mortgage_rate,r.mortgage_term_years)
+            mort[:,t,j]=new_bal
+            re_interest[:,t,j]=interest_paid
+            re_principal[:,t,j]=principal_paid
+            rent=r.annual_rent*((1+config.expense_inflation)**t)*(1-r.vacancy_rate)
+            carrying=prop[:,t,j]*(r.property_tax_rate+r.maintenance_rate)+r.annual_insurance*((1+config.expense_inflation)**t)+debt_service
+            re_cash[:,t,j]=rent-carrying
+            equity[:,t,j]=prop[:,t,j]-mort[:,t,j]
+        gross=np.full(ns,inc[t])
+        if config.income_volatility>0: gross=np.maximum(gross*(1+rng.normal(0,config.income_volatility,ns)),0.0)
+        leftover=gross*(1-config.tax_rate)-exp[t]-large[t]+(re_cash[:,t,:].sum(axis=1) if nr else 0.0)
+        _allocate_and_withdraw(balances,bases,t,leftover,assets,age,config)
+        nw[:,t]=balances[:,t,:].sum(axis=1)+(equity[:,t,:].sum(axis=1) if nr else 0.0)
+    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
 
+def percentile_summary(net_worth,percentiles=(5,25,50,75,95)):
+    return {p:np.percentile(net_worth,p,axis=0) for p in percentiles}
 
-def _withdraw_for_shortfall(balances: np.ndarray, t: int, shortfall: np.ndarray,
-                             negative_mask: np.ndarray, assets: List[AssetClass]) -> None:
-    """Funds a shortfall year (expenses > after-tax income) by withdrawing
-    from liquid assets first, then illiquid assets. If everything is
-    exhausted, the most liquid asset is allowed to go negative,
-    representing debt."""
-    order = sorted(range(len(assets)), key=lambda i: 0 if assets[i].liquidity == "liquid" else 1)
-    remaining = shortfall.copy()
-
-    for a_idx in order:
-        avail = np.maximum(balances[:, t, a_idx], 0.0)
-        withdraw = np.minimum(remaining, avail)
-        withdraw = np.where(negative_mask, withdraw, 0.0)
-        balances[:, t, a_idx] -= withdraw
-        remaining -= withdraw
-
-    if order and remaining.any():
-        balances[:, t, order[0]] -= remaining
-
-
-def _allocate_and_withdraw(balances: np.ndarray, t: int, leftover: np.ndarray,
-                            assets: List[AssetClass]) -> None:
-    positive_amounts = np.where(leftover > 0, leftover, 0.0)
-    if positive_amounts.any():
-        _allocate_positive(balances, t, positive_amounts, assets)
-
-    negative_mask = leftover < 0
-    if negative_mask.any():
-        shortfall = np.where(negative_mask, -leftover, 0.0)
-        _withdraw_for_shortfall(balances, t, shortfall, negative_mask, assets)
-
-
-# --------------------------------------------------------------------------
-# Main Monte Carlo entry point
-# --------------------------------------------------------------------------
-
-def run_monte_carlo(config: SimulationConfig) -> dict:
-    """Runs a vectorized Monte Carlo simulation of net worth over the
-    configured lifetime.
-
-    Returns a dict with:
-        ages:                 list[int]                length = n_years
-        net_worth:             np.ndarray (n_sims, n_years)
-        balances:               np.ndarray (n_sims, n_years, n_assets)
-        asset_names:            list[str]
-        income_path:             np.ndarray (n_years,)  gross income, pre-volatility/tax
-        after_tax_income_path:    np.ndarray (n_years,)  expected after-tax income, pre-volatility
-        expense_path:             np.ndarray (n_years,)  recurring expenses (pre large expenses)
-        large_expense_path:        np.ndarray (n_years,)
-        inflation_rate:              float               expense_inflation used (for deflating to real $)
-        tax_rate:                     float
-    """
-    ages = list(range(config.start_age, config.end_age + 1))
-    n_years = len(ages)
-    n_sims = max(1, int(config.num_simulations))
-
-    assets = list(config.assets) if config.assets else [AssetClass("Cash", 0.0, 1.0, 0.0, 0.0, "liquid")]
-
-    # normalize allocations so they sum to 1.0 (unallocated leftover would
-    # otherwise silently vanish rather than compound anywhere)
-    total_alloc = sum(a.allocation_pct for a in assets)
-    if total_alloc > 0 and abs(total_alloc - 1.0) > 1e-9:
-        assets = [
-            AssetClass(a.name, a.initial_balance, a.allocation_pct / total_alloc,
-                       a.expected_return, a.volatility, a.liquidity, a.annual_contribution_cap)
-            for a in assets
-        ]
-
-    n_assets = len(assets)
-    rng = np.random.default_rng(config.seed)
-
-    balances = np.zeros((n_sims, n_years, n_assets))
-    for i, asset in enumerate(assets):
-        balances[:, 0, i] = asset.initial_balance
-
-    income_schedule = build_income_schedule(config, ages)
-    expense_schedule = build_expense_schedule(config, ages)
-    large_expense_map = build_large_expense_map(config)
-
-    income_path = np.array([income_schedule[a] for a in ages])
-    expense_path = np.array([expense_schedule[a] for a in ages])
-    large_expense_path = np.array([large_expense_map.get(a, 0.0) for a in ages])
-    after_tax_income_path = income_path * (1 - config.tax_rate)
-
-    net_worth = np.zeros((n_sims, n_years))
-
-    for t in range(n_years):
-        if t > 0:
-            # grow existing balances with a random draw per asset per simulation
-            for i, asset in enumerate(assets):
-                prev_bal = balances[:, t - 1, i]
-                returns = rng.normal(asset.expected_return, asset.volatility, n_sims)
-                returns = np.maximum(returns, -0.95)  # floor: can't lose more than 95% in a year
-                balances[:, t, i] = prev_bal * (1 + returns)
-            # t == 0: balances already hold each asset's initial_balance
-
-        # this year's income (with optional volatility), taxed, minus expenses
-        gross_income = np.full(n_sims, income_path[t])
-        if config.income_volatility > 0:
-            gross_income = gross_income * (1 + rng.normal(0, config.income_volatility, n_sims))
-            gross_income = np.maximum(gross_income, 0.0)
-        after_tax_income = gross_income * (1 - config.tax_rate)
-
-        leftover = after_tax_income - expense_path[t] - large_expense_path[t]
-
-        _allocate_and_withdraw(balances, t, leftover, assets)
-
-        net_worth[:, t] = balances[:, t, :].sum(axis=1)
-
-    return {
-        "ages": ages,
-        "net_worth": net_worth,
-        "balances": balances,
-        "asset_names": [a.name for a in assets],
-        "income_path": income_path,
-        "after_tax_income_path": after_tax_income_path,
-        "expense_path": expense_path,
-        "large_expense_path": large_expense_path,
-        "inflation_rate": config.expense_inflation,
-        "tax_rate": config.tax_rate,
-    }
-
-
-def percentile_summary(net_worth: np.ndarray, percentiles=(5, 25, 50, 75, 95)) -> Dict[int, np.ndarray]:
-    """Convenience helper: {percentile: array_over_time}."""
-    return {p: np.percentile(net_worth, p, axis=0) for p in percentiles}
-
-
-def deflate_to_real(values, ages, inflation_rate):
-    base_age = ages[0]
-    factors = np.array([(1 + inflation_rate) ** (a - base_age) for a in ages])
-    
-    # Check dimensions and reshape factors for broadcasting
-    if values.ndim == 3:
-        # values shape: (simulations, ages, assets) -> shape factors to (1, ages, 1)
-        factors = factors[np.newaxis, :, np.newaxis]
-    elif values.ndim == 2:
-        # values shape: (simulations, ages) or (ages, assets)
-        if values.shape[0] == len(ages):
-            factors = factors[:, np.newaxis]
-        else:
-            factors = factors[np.newaxis, :]
-
-    return values / factors
+def deflate_to_real(values,ages,inflation_rate):
+    factors=np.array([(1+inflation_rate)**(a-ages[0]) for a in ages])
+    if values.ndim==3: factors=factors[np.newaxis,:,np.newaxis]
+    elif values.ndim==2:
+        factors=factors[:,np.newaxis] if values.shape[0]==len(ages) else factors[np.newaxis,:]
+    return values/factors

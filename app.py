@@ -24,6 +24,7 @@ import streamlit as st
 
 from simulation import (
     AssetClass,
+    RealEstateAsset,
     ExpenseChange,
     IncomeChange,
     LargeExpense,
@@ -51,20 +52,17 @@ UNLIMITED_CAP_SENTINEL = 999_999_999  # shown in the editor to mean "no contribu
 DEFAULT_ASSETS = pd.DataFrame(
     [
         {"Asset Class": "Cash / Savings", "Initial Balance": 5000, "Allocation %": 10.0,
-         "Expected Return %": 2.0, "Volatility %": 0.5, "Liquid": True,
-         "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
+         "Expected Return %": 2.0, "Volatility %": 0.5, "Liquid": True, "Account Type": "cash",
+         "Market Beta": 0.05, "Cost Basis": 5000, "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
         {"Asset Class": "CDs", "Initial Balance": 5000, "Allocation %": 15.0,
-         "Expected Return %": 4.5, "Volatility %": 1.0, "Liquid": True,
-         "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
-        {"Asset Class": "IRA", "Initial Balance": 10000, "Allocation %": 20.0,
-         "Expected Return %": 7.0, "Volatility %": 12.0, "Liquid": False,
-         "Annual Contribution Cap": 7000},
-        {"Asset Class": "Real Estate", "Initial Balance": 0, "Allocation %": 15.0,
-         "Expected Return %": 4.0, "Volatility %": 8.0, "Liquid": False,
-         "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
-        {"Asset Class": "Investment Portfolio", "Initial Balance": 10000, "Allocation %": 40.0,
-         "Expected Return %": 8.0, "Volatility %": 15.0, "Liquid": True,
-         "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
+         "Expected Return %": 4.5, "Volatility %": 1.0, "Liquid": True, "Account Type": "taxable",
+         "Market Beta": 0.10, "Cost Basis": 5000, "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
+        {"Asset Class": "IRA", "Initial Balance": 10000, "Allocation %": 25.0,
+         "Expected Return %": 7.0, "Volatility %": 12.0, "Liquid": False, "Account Type": "tax_deferred",
+         "Market Beta": 0.80, "Cost Basis": 0, "Annual Contribution Cap": 7000},
+        {"Asset Class": "Investment Portfolio", "Initial Balance": 10000, "Allocation %": 50.0,
+         "Expected Return %": 8.0, "Volatility %": 15.0, "Liquid": True, "Account Type": "taxable",
+         "Market Beta": 0.85, "Cost Basis": 10000, "Annual Contribution Cap": UNLIMITED_CAP_SENTINEL},
     ]
 )
 
@@ -83,10 +81,10 @@ with st.sidebar:
                                help="Applied every year that doesn't have an explicit career change below.") / 100
     income_volatility = st.slider("Income Volatility (%)", 0.0, 40.0, 5.0, 0.5,
                                    help="Year-to-year randomness representing bonus/job-loss risk.") / 100
-    tax_rate = st.slider("Effective Tax Rate on Income (%)", 0.0, 50.0, 22.0, 1.0,
-                          help="A flat effective rate (combined federal + state + payroll) applied to gross "
-                               "income before it's available to spend or save. Using effective (not marginal) "
-                               "rate gives a more realistic cash-flow picture.") / 100
+    tax_rate = st.slider("Effective Tax Rate on Income (%)", 0.0, 50.0, 22.0, 1.0) / 100
+    ordinary_withdrawal_tax_rate = st.slider("Tax Rate on Tax-Deferred Withdrawals (%)", 0.0, 50.0, 22.0, 1.0) / 100
+    capital_gains_tax_rate = st.slider("Capital Gains Tax Rate (%)", 0.0, 40.0, 15.0, 1.0) / 100
+    early_withdrawal_penalty_rate = st.slider("Early Retirement Withdrawal Penalty (%)", 0.0, 20.0, 10.0, 1.0) / 100
 
     st.header("🧾 Recurring Expenses")
     base_expenses = st.number_input("Current Annual Living Expenses ($)", min_value=0, max_value=10_000_000,
@@ -96,6 +94,8 @@ with st.sidebar:
 
     st.header("🎲 Monte Carlo Settings")
     num_sims = st.select_slider("Number of Simulations", options=[100, 500, 1000, 2000, 5000], value=1000)
+    market_autocorrelation = st.slider("Market Shock Persistence", 0.0, 0.8, 0.25, 0.05,
+        help="Correlates broad market shocks across adjacent years; 0 means no year-to-year persistence.") 
     use_seed = st.checkbox("Use fixed random seed (reproducible results)", value=True)
     seed = 42 if use_seed else None
 
@@ -182,8 +182,21 @@ assets_df = st.data_editor(
         "Expected Return %": st.column_config.NumberColumn(step=0.5),
         "Volatility %": st.column_config.NumberColumn(min_value=0, step=0.5),
         "Liquid": st.column_config.CheckboxColumn(),
+        "Account Type": st.column_config.SelectboxColumn(options=["cash", "taxable", "tax_deferred", "tax_free"]),
+        "Market Beta": st.column_config.NumberColumn(min_value=0.0, max_value=0.99, step=0.05),
+        "Cost Basis": st.column_config.NumberColumn(min_value=0, step=500, format="$%d"),
         "Annual Contribution Cap": st.column_config.NumberColumn(min_value=0, step=500, format="$%d"),
     },
+)
+
+st.subheader("🏘️ Real Estate")
+st.caption("Real estate is modeled separately: appreciation applies to full property value, the mortgage amortizes, rental cash flow includes vacancy and carrying costs, and only equity counts toward net worth.")
+real_estate_df = st.data_editor(
+    pd.DataFrame([{"Property": "Primary / Rental Property", "Property Value": 0, "Mortgage Balance": 0,
+                   "Mortgage Rate %": 6.5, "Mortgage Term Years": 30, "Appreciation %": 3.0,
+                   "Appreciation Volatility %": 8.0, "Market Beta": 0.35, "Annual Rent": 0,
+                   "Vacancy %": 5.0, "Property Tax %": 1.0, "Annual Insurance": 0, "Maintenance %": 1.0}]),
+    num_rows="dynamic", use_container_width=True, key="real_estate_editor",
 )
 
 alloc_sum = pd.to_numeric(assets_df["Allocation %"], errors="coerce").sum()
@@ -241,8 +254,26 @@ if run_clicked:
                 volatility=float(r["Volatility %"]) / 100,
                 liquidity="liquid" if bool(r.get("Liquid", True)) else "illiquid",
                 annual_contribution_cap=contribution_cap,
+                account_type=str(r.get("Account Type", "taxable")),
+                market_beta=float(r.get("Market Beta", 0.7)),
+                capital_gains_tax_rate=capital_gains_tax_rate,
+                cost_basis=float(r.get("Cost Basis", r["Initial Balance"])) if not pd.isna(r.get("Cost Basis", r["Initial Balance"])) else float(r["Initial Balance"]),
             )
         )
+
+    real_estate = []
+    for _, r in real_estate_df.dropna(subset=["Property", "Property Value"]).iterrows():
+        if float(r["Property Value"]) <= 0:
+            continue
+        real_estate.append(RealEstateAsset(
+            name=str(r["Property"]), property_value=float(r["Property Value"]),
+            mortgage_balance=float(r.get("Mortgage Balance", 0)), mortgage_rate=float(r.get("Mortgage Rate %", 0))/100,
+            mortgage_term_years=int(r.get("Mortgage Term Years", 30)), appreciation_rate=float(r.get("Appreciation %", 3))/100,
+            appreciation_volatility=float(r.get("Appreciation Volatility %", 8))/100, market_beta=float(r.get("Market Beta", 0.35)),
+            annual_rent=float(r.get("Annual Rent", 0)), vacancy_rate=float(r.get("Vacancy %", 5))/100,
+            property_tax_rate=float(r.get("Property Tax %", 1))/100, annual_insurance=float(r.get("Annual Insurance", 0)),
+            maintenance_rate=float(r.get("Maintenance %", 1))/100,
+        ))
 
     config = SimulationConfig(
         start_age=int(start_age),
@@ -252,11 +283,16 @@ if run_clicked:
         income_changes=income_changes,
         income_volatility=income_volatility,
         tax_rate=tax_rate,
+        ordinary_withdrawal_tax_rate=ordinary_withdrawal_tax_rate,
+        capital_gains_tax_rate=capital_gains_tax_rate,
+        early_withdrawal_penalty_rate=early_withdrawal_penalty_rate,
         base_expenses=float(base_expenses),
         expense_inflation=expense_inflation,
         expense_changes=expense_changes,
         large_expenses=large_expenses,
         assets=assets,
+        real_estate=real_estate,
+        market_autocorrelation=market_autocorrelation,
         num_simulations=int(num_sims),
         seed=seed,
     )
@@ -359,10 +395,14 @@ if st.session_state.scenarios:
         balances = _adj(res["balances"], res)  # deflate_to_real broadcasts over the last (age) axis
         mean_balances = balances.mean(axis=0)
         df_breakdown = pd.DataFrame(mean_balances, columns=res["asset_names"])
+        if res.get("real_estate_names"):
+            re_equity = _adj(res["real_estate_equity"], res).mean(axis=0)
+            for i, name in enumerate(res["real_estate_names"]):
+                df_breakdown[f"{name} (equity)"] = re_equity[:, i]
         df_breakdown.insert(0, "Age", ages)
 
         fig4 = go.Figure()
-        for col in res["asset_names"]:
+        for col in [c for c in df_breakdown.columns if c != "Age"]:
             fig4.add_trace(go.Scatter(x=df_breakdown["Age"], y=df_breakdown[col], stackgroup="one", name=col))
         fig4.update_layout(
             title="Average Asset Balances Over Time", xaxis_title="Age", yaxis_title=dollar_label, height=450,
