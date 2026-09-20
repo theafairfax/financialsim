@@ -9,9 +9,7 @@ real estate, brokerage investments, cash, or any custom asset you define).
 
 A single projection (e.g. "assume 7% returns every year") hides the real
 risk in long-term financial planning. This app instead simulates hundreds or
-thousands of possible futures, drawing a random annual return for each
-asset class (and optionally random income shocks) from a normal distribution
-around your expected return and volatility. The result is a **range** of
+thousands of possible futures, drawing lognormal annual returns with a shared market shock (and optionally random income shocks). The shared factor correlates assets in the same bad or good year and can persist into adjacent years. The result is a **range** of
 outcomes — a 5th–95th percentile band and a median line — so you can see not
 just "what's likely" but "how bad could it get" and "how good could it get."
 
@@ -28,7 +26,7 @@ just "what's likely" but "how bad could it get" and "how good could it get."
   compounding on top of the new baseline afterward.
 - **Large one-time expenses** — a table of big purchases/events at specific ages
   (down payment, wedding, tuition, medical bills, etc.).
-- **Savings & investment allocation** — a table of asset classes, each with:
+- **Savings & investment allocation** — a table of financial asset classes with explicit account tax type and market-factor exposure, each with:
   - Initial balance
   - % of each year's leftover cash flow allocated to it
   - Expected annual return and volatility (used to randomly draw returns each year)
@@ -65,15 +63,10 @@ Then open the local URL Streamlit prints (usually `http://localhost:8501`).
 
 ## Notes on the model
 
-- Each asset's annual return is drawn independently from
-  `Normal(expected_return, volatility)`, floored at -95% to avoid unrealistic
-  runaway negative compounding.
+- Financial assets use lognormal gross returns, naturally bounded at -100%. A shared market factor plus asset-specific shocks creates cross-asset correlation, while configurable market-shock persistence introduces correlation across adjacent years.
 - Allocation percentages are normalized to sum to 100% automatically if you
   enter values that don't add up exactly.
-- **Taxes** are modeled as a single flat effective rate applied to gross
-  income before it's available to spend or save (no bracket modeling, no
-  separate capital-gains treatment, no state-specific rules — use your own
-  blended effective rate for the most realistic result).
+- **Taxes** distinguish ordinary income, tax-deferred withdrawals, and taxable brokerage gains. Tax-deferred withdrawals are taxed on the full distribution and receive the configured early-withdrawal penalty before age 59.5; taxable withdrawals apply capital-gains tax only to the unrealized-gain fraction tracked through cost basis.
 - **Contribution caps**: if an asset's cap would be exceeded in a given year,
   the excess automatically flows to uncapped assets proportional to their
   allocation share. If every asset happens to be capped and there's still
@@ -88,11 +81,6 @@ Then open the local URL Streamlit prints (usually `http://localhost:8501`).
   general inflation. This is the more realistic default view for long
   horizons — nominal dollars decades out can look dramatically larger than
   they're actually worth.
-- Known simplifications not modeled: progressive tax brackets, capital gains
-  vs. ordinary income tax treatment, Social Security, mortgage
-  amortization/leverage on real estate, rental income, required minimum
-  distributions, and correlation between asset classes' returns (each
-  asset's random return is drawn independently every year). These are
-  reasonable next steps if you want to push realism further.
+- **Real estate** is a dedicated leveraged asset model: appreciation is applied to full property value, mortgages amortize into interest/principal, rental income is vacancy-adjusted, carrying costs include property tax/insurance/maintenance, and only equity contributes to net worth.\n- Remaining simplifications include progressive tax brackets, Social Security, required minimum distributions, transaction costs, depreciation/deductions, and property-sale taxes.
 - This is an educational planning tool, not financial advice — expected
   returns, volatilities, and tax rates are user-supplied assumptions.
