@@ -263,7 +263,7 @@ def run_monte_carlo(config):
         leftover=leftover-lost_income[:,t]
         _allocate_and_withdraw(balances,bases,t,leftover,assets,age,config)
         nw[:,t]=balances[:,t,:].sum(axis=1)+(equity[:,t,:].sum(axis=1) if nr else 0.0)
-    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"lost_income":lost_income,"lost_income_pct":config.lost_income_pct,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
+    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"lost_income":lost_income,"expected_lost_income_path":lost_income.mean(axis=0),"lost_income_pct":config.lost_income_pct,"income_is_post_tax":config.income_is_post_tax,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
 
 def percentile_summary(net_worth,percentiles=(5,25,50,75,95)):
     return {p:np.percentile(net_worth,p,axis=0) for p in percentiles}
