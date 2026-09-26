@@ -1,6 +1,6 @@
 """Core Monte Carlo engine for the Lifetime Financial Simulator."""
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Optional
 import numpy as np
 
 @dataclass
@@ -190,7 +190,7 @@ def run_monte_carlo(config):
     for j,r in enumerate(real_estate):
         prop[:,0,j]=r.property_value; mort[:,0,j]=min(r.mortgage_balance,r.property_value); equity[:,0,j]=prop[:,0,j]-mort[:,0,j]
     inc=np.array([build_income_schedule(config,ages)[a] for a in ages]); exp=np.array([build_expense_schedule(config,ages)[a] for a in ages]); large_map=build_large_expense_map(config)
-    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc*(1-config.tax_rate); nw=np.zeros((ns,ny)); market=np.zeros((ns,ny))
+    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc*(1-config.tax_rate); nw=np.zeros((ns,ny)); market=np.zeros((ns,ny)); lost_income=np.zeros((ns,ny))
     phi=float(np.clip(config.market_autocorrelation,-0.95,0.95))
     for t,age in enumerate(ages):
         if t>0:
@@ -216,7 +216,7 @@ def run_monte_carlo(config):
         leftover=gross*(1-config.tax_rate)-exp[t]-large[t]+(re_cash[:,t,:].sum(axis=1) if nr else 0.0)
         _allocate_and_withdraw(balances,bases,t,leftover,assets,age,config)
         nw[:,t]=balances[:,t,:].sum(axis=1)+(equity[:,t,:].sum(axis=1) if nr else 0.0)
-    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
+    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"lost_income":lost_income,"lost_income_pct":config.lost_income_pct,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
 
 def percentile_summary(net_worth,percentiles=(5,25,50,75,95)):
     return {p:np.percentile(net_worth,p,axis=0) for p in percentiles}
