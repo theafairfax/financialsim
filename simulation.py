@@ -234,7 +234,7 @@ def run_monte_carlo(config):
     for j,r in enumerate(real_estate):
         prop[:,0,j]=r.property_value; mort[:,0,j]=min(r.mortgage_balance,r.property_value); equity[:,0,j]=prop[:,0,j]-mort[:,0,j]
     inc=np.array([build_income_schedule(config,ages)[a] for a in ages]); exp=np.array([build_expense_schedule(config,ages)[a] for a in ages]); large_map=build_large_expense_map(config)
-    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc.copy() if config.income_is_post_tax else estimate_income_taxes(inc,config.filing_status,config.state_effective_tax_rate,config.additional_deductions)["after_tax_income"]; nw=np.zeros((ns,ny)); market=np.zeros((ns,ny)); lost_income=np.zeros((ns,ny)); lost_income=np.zeros((ns,ny))
+    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc.copy() if config.income_is_post_tax else estimate_income_taxes(inc,config.filing_status,config.state_effective_tax_rate,config.additional_deductions)["after_tax_income"]; nw=np.zeros((ns,ny)); market=np.zeros((ns,ny)); lost_income=np.zeros((ns,ny))
     phi=float(np.clip(config.market_autocorrelation,-0.95,0.95))
     for t,age in enumerate(ages):
         if t>0:
