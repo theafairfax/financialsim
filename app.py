@@ -30,6 +30,7 @@ from simulation import (
     LargeExpense,
     SimulationConfig,
     deflate_to_real,
+    estimate_income_taxes,
     run_monte_carlo,
 )
 
@@ -48,6 +49,16 @@ if "scenario_configs" not in st.session_state:
     st.session_state.scenario_configs = {}  # name -> human-readable config summary
 
 UNLIMITED_CAP_SENTINEL = 999_999_999  # shown in the editor to mean "no contribution cap"
+
+US_STATES = [
+    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida",
+    "Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine",
+    "Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska",
+    "Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota",
+    "Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee",
+    "Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"
+]
+NO_INDIVIDUAL_INCOME_TAX_STATES = {"Alaska","Florida","Nevada","New Hampshire","South Dakota","Tennessee","Texas","Washington","Wyoming"}
 
 DEFAULT_ASSETS = pd.DataFrame(
     [
@@ -75,13 +86,51 @@ with st.sidebar:
     end_age = st.number_input("Simulate Until Age", min_value=int(start_age) + 1, max_value=120, value=90, step=1)
 
     st.header("💵 Income")
-    base_income = st.number_input("Current Annual Income ($)", min_value=0, max_value=10_000_000,
-                                   value=75000, step=1000)
+    income_entry_mode = st.radio(
+        "Income Entry Mode",
+        ["Gross income (estimate taxes)", "Post-tax income"],
+        help="Use gross income to estimate federal, payroll, and state taxes, or enter take-home income directly."
+    )
+    income_is_post_tax = income_entry_mode == "Post-tax income"
+    income_label = "Current Annual Post-Tax Income ($)" if income_is_post_tax else "Current Annual Gross Income ($)"
+    base_income = st.number_input(income_label, min_value=0, max_value=10_000_000, value=75000, step=1000)
+
+    filing_status = "Single"
+    state_name = "Alabama"
+    state_effective_tax_rate = 0.0
+    additional_deductions = 0.0
+    tax_rate = 0.0
+    if not income_is_post_tax:
+        filing_status = st.selectbox(
+            "Federal Filing Status",
+            ["Single", "Married Filing Jointly", "Married Filing Separately", "Head of Household"],
+        )
+        state_name = st.selectbox("State", US_STATES, index=US_STATES.index("Alabama"))
+        no_state_income_tax = state_name in NO_INDIVIDUAL_INCOME_TAX_STATES
+        state_effective_tax_rate = st.number_input(
+            "Estimated Effective State Income Tax Rate (%)",
+            min_value=0.0, max_value=20.0, value=0.0 if no_state_income_tax else 4.0, step=0.1,
+            disabled=no_state_income_tax,
+            help="State taxes vary by deductions, credits, local taxes, and progressive schedules. Use an effective rate for your situation."
+        ) / 100
+        additional_deductions = st.number_input(
+            "Additional Federal Deductions Beyond Standard Deduction ($)",
+            min_value=0, max_value=5_000_000, value=0, step=500,
+        )
+        tax_preview = estimate_income_taxes(
+            float(base_income), filing_status, state_effective_tax_rate, float(additional_deductions)
+        )
+        tax_rate = float(tax_preview["total_tax"] / base_income) if base_income else 0.0
+        st.caption(
+            f"Estimated current taxes: federal ${float(tax_preview['federal_income_tax']):,.0f} + "
+            f"payroll ${float(tax_preview['payroll_tax']):,.0f} + state ${float(tax_preview['state_income_tax']):,.0f} "
+            f"= ${float(tax_preview['total_tax']):,.0f}; estimated take-home ${float(tax_preview['after_tax_income']):,.0f}."
+        )
+
     income_growth = st.slider("Organic Annual Raise (%)", 0.0, 15.0, 2.0, 0.1,
                                help="Applied every year that doesn't have an explicit career change below.") / 100
     income_volatility = st.slider("Income Volatility (%)", 0.0, 40.0, 5.0, 0.5,
                                    help="Year-to-year randomness representing bonus/job-loss risk.") / 100
-    tax_rate = st.slider("Effective Tax Rate on Income (%)", 0.0, 50.0, 22.0, 1.0) / 100
     ordinary_withdrawal_tax_rate = st.slider("Tax Rate on Tax-Deferred Withdrawals (%)", 0.0, 50.0, 22.0, 1.0) / 100
     capital_gains_tax_rate = st.slider("Capital Gains Tax Rate (%)", 0.0, 40.0, 15.0, 1.0) / 100
     early_withdrawal_penalty_rate = st.slider("Early Retirement Withdrawal Penalty (%)", 0.0, 20.0, 10.0, 1.0) / 100
