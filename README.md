@@ -16,23 +16,21 @@ just "what's likely" but "how bad could it get" and "how good could it get."
 ## Features
 
 - **Time range** — set your current age and how far out to simulate (e.g. to age 90).
-- **Income** — base salary, an organic annual raise rate, income volatility
-  (job loss / bonus risk), an effective tax rate, and a **career path table**
-  where you can specify income changes at any age (promotions, career
-  switches, sabbaticals, retirement).
+- **Income** — enter either gross income or post-tax income. Gross-income mode estimates 2026 federal income tax by filing status, employee Social Security/Medicare, and an adjustable effective state income-tax rate. A **career path table** lets you specify income changes at any age.
 - **Recurring expenses** — your baseline "non-redeemable" living costs, growing with inflation, **plus a
   cost-of-living change table** so you can model a jump (or drop) in expenses starting at a given age —
   relocating to a pricier city, paying off a mortgage, downsizing, kids leaving home, etc. Inflation keeps
   compounding on top of the new baseline afterward.
 - **Large one-time expenses** — a table of big purchases/events at specific ages
   (down payment, wedding, tuition, medical bills, etc.).
-- **Savings & investment allocation** — a table of financial asset classes with explicit account tax type and market-factor exposure, each with:
+- **Savings & investment allocation** — reserve a configurable **Lost Income / Unplanned Spending** share of positive leftover cash flow before allocating the remainder across financial asset classes. Each asset supports:
   - Initial balance
   - % of each year's leftover cash flow allocated to it
   - Expected annual return and volatility (used to randomly draw returns each year)
   - Liquidity (liquid assets are drawn down first if you have a shortfall year)
   - **Annual contribution cap** (optional) — mirrors real-world limits like an IRA's
     ~$7,000/year cap; amounts above the cap automatically overflow into uncapped assets
+- **Real estate modes** — choose a simplified **Single Homestead** interface with rental-only fields hidden, or **Rental Property / Portfolio** mode with rent, vacancy, and multiple properties.
 - **Scenario comparison** — run a baseline, tweak one variable, run again, and
   overlay the median trajectories to see how small changes compound over decades.
 - **Today's-dollars toggle** — deflate every chart/metric by the scenario's inflation
@@ -81,6 +79,6 @@ Then open the local URL Streamlit prints (usually `http://localhost:8501`).
   general inflation. This is the more realistic default view for long
   horizons — nominal dollars decades out can look dramatically larger than
   they're actually worth.
-- **Real estate** is a dedicated leveraged asset model: appreciation is applied to full property value, mortgages amortize into interest/principal, rental income is vacancy-adjusted, carrying costs include property tax/insurance/maintenance, and only equity contributes to net worth.\n- Remaining simplifications include progressive tax brackets, Social Security, required minimum distributions, transaction costs, depreciation/deductions, and property-sale taxes.
+- **Real estate** is a dedicated leveraged asset model: appreciation is applied to full property value, mortgages amortize into interest/principal, rental income is vacancy-adjusted, carrying costs include property tax/insurance/maintenance, and only equity contributes to net worth.\n- Federal wage-tax estimates use 2026 progressive brackets and standard deductions plus employee Social Security/Medicare. State tax is modeled as an adjustable effective rate because state deductions, credits, local taxes, and progressive schedules vary widely. Remaining simplifications include tax credits, itemization details, required minimum distributions, transaction costs, rental depreciation/deductions, and property-sale taxes.
 - This is an educational planning tool, not financial advice — expected
   returns, volatilities, and tax rates are user-supplied assumptions.

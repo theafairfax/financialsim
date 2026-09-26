@@ -1,7 +1,46 @@
 """Core Monte Carlo engine for the Lifetime Financial Simulator."""
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Optional
 import numpy as np
+
+
+FEDERAL_TAX_BRACKETS_2026 = {
+    "Single": [(12400, 0.10), (50400, 0.12), (105700, 0.22), (201775, 0.24), (256225, 0.32), (640600, 0.35), (float("inf"), 0.37)],
+    "Married Filing Jointly": [(24800, 0.10), (100800, 0.12), (211400, 0.22), (403550, 0.24), (512450, 0.32), (768700, 0.35), (float("inf"), 0.37)],
+    "Married Filing Separately": [(12400, 0.10), (50400, 0.12), (105700, 0.22), (201775, 0.24), (256225, 0.32), (384350, 0.35), (float("inf"), 0.37)],
+    "Head of Household": [(17700, 0.10), (67450, 0.12), (105700, 0.22), (201750, 0.24), (256200, 0.32), (640600, 0.35), (float("inf"), 0.37)],
+}
+STANDARD_DEDUCTION_2026 = {
+    "Single": 16100,
+    "Married Filing Jointly": 32200,
+    "Married Filing Separately": 16100,
+    "Head of Household": 24150,
+}
+
+def estimate_income_taxes(gross_income, filing_status="Single", state_effective_rate=0.0, deductions=0.0):
+    """Estimate 2026 U.S. federal income tax, employee FICA, and state income tax."""
+    gross = np.maximum(np.asarray(gross_income, dtype=float), 0.0)
+    status = filing_status if filing_status in FEDERAL_TAX_BRACKETS_2026 else "Single"
+    deduction = max(STANDARD_DEDUCTION_2026[status] + float(deductions), 0.0)
+    taxable = np.maximum(gross - deduction, 0.0)
+    federal = np.zeros_like(taxable)
+    lower = 0.0
+    for upper, rate in FEDERAL_TAX_BRACKETS_2026[status]:
+        federal += np.maximum(np.minimum(taxable, upper) - lower, 0.0) * rate
+        lower = upper
+    social_security = np.minimum(gross, 184500.0) * 0.062
+    medicare = gross * 0.0145
+    threshold = 250000.0 if status == "Married Filing Jointly" else 125000.0 if status == "Married Filing Separately" else 200000.0
+    additional_medicare = np.maximum(gross - threshold, 0.0) * 0.009
+    state = gross * np.clip(float(state_effective_rate), 0.0, 1.0)
+    total = federal + social_security + medicare + additional_medicare + state
+    return {
+        "federal_income_tax": federal,
+        "payroll_tax": social_security + medicare + additional_medicare,
+        "state_income_tax": state,
+        "total_tax": total,
+        "after_tax_income": np.maximum(gross - total, 0.0),
+    }
 
 @dataclass
 class IncomeChange:
@@ -70,6 +109,11 @@ class SimulationConfig:
     large_expenses: List[LargeExpense] = field(default_factory=list)
     assets: List[AssetClass] = field(default_factory=list)
     real_estate: List[RealEstateAsset] = field(default_factory=list)
+    income_is_post_tax: bool = False
+    filing_status: str = "Single"
+    state_effective_tax_rate: float = 0.0
+    additional_deductions: float = 0.0
+    lost_income_pct: float = 0.0
     market_autocorrelation: float = 0.25
     num_simulations: int = 1000
     seed: Optional[int] = 42
@@ -190,7 +234,7 @@ def run_monte_carlo(config):
     for j,r in enumerate(real_estate):
         prop[:,0,j]=r.property_value; mort[:,0,j]=min(r.mortgage_balance,r.property_value); equity[:,0,j]=prop[:,0,j]-mort[:,0,j]
     inc=np.array([build_income_schedule(config,ages)[a] for a in ages]); exp=np.array([build_expense_schedule(config,ages)[a] for a in ages]); large_map=build_large_expense_map(config)
-    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc*(1-config.tax_rate); nw=np.zeros((ns,ny)); market=np.zeros((ns,ny))
+    large=np.array([large_map.get(a,0.0) for a in ages]); after=inc.copy() if config.income_is_post_tax else estimate_income_taxes(inc,config.filing_status,config.state_effective_tax_rate,config.additional_deductions)["after_tax_income"]; nw=np.zeros((ns,ny)); market=np.zeros((ns,ny)); lost_income=np.zeros((ns,ny))
     phi=float(np.clip(config.market_autocorrelation,-0.95,0.95))
     for t,age in enumerate(ages):
         if t>0:
@@ -213,10 +257,13 @@ def run_monte_carlo(config):
             equity[:,t,j]=prop[:,t,j]-mort[:,t,j]
         gross=np.full(ns,inc[t])
         if config.income_volatility>0: gross=np.maximum(gross*(1+rng.normal(0,config.income_volatility,ns)),0.0)
-        leftover=gross*(1-config.tax_rate)-exp[t]-large[t]+(re_cash[:,t,:].sum(axis=1) if nr else 0.0)
+        take_home=gross if config.income_is_post_tax else estimate_income_taxes(gross,config.filing_status,config.state_effective_tax_rate,config.additional_deductions)["after_tax_income"]
+        leftover=take_home-exp[t]-large[t]+(re_cash[:,t,:].sum(axis=1) if nr else 0.0)
+        lost_income[:,t]=np.maximum(leftover,0.0)*np.clip(config.lost_income_pct,0.0,1.0)
+        leftover=leftover-lost_income[:,t]
         _allocate_and_withdraw(balances,bases,t,leftover,assets,age,config)
         nw[:,t]=balances[:,t,:].sum(axis=1)+(equity[:,t,:].sum(axis=1) if nr else 0.0)
-    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
+    return {"ages":ages,"net_worth":nw,"balances":balances,"asset_names":[a.name for a in assets],"income_path":inc,"after_tax_income_path":after,"expense_path":exp,"large_expense_path":large,"lost_income":lost_income,"expected_lost_income_path":lost_income.mean(axis=0),"lost_income_pct":config.lost_income_pct,"income_is_post_tax":config.income_is_post_tax,"inflation_rate":config.expense_inflation,"tax_rate":config.tax_rate,"market_factor":market,"real_estate_names":[r.name for r in real_estate],"real_estate_property_values":prop,"real_estate_mortgage_balances":mort,"real_estate_equity":equity,"real_estate_cash_flow":re_cash,"real_estate_interest_paid":re_interest,"real_estate_principal_paid":re_principal}
 
 def percentile_summary(net_worth,percentiles=(5,25,50,75,95)):
     return {p:np.percentile(net_worth,p,axis=0) for p in percentiles}

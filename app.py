@@ -30,6 +30,7 @@ from simulation import (
     LargeExpense,
     SimulationConfig,
     deflate_to_real,
+    estimate_income_taxes,
     run_monte_carlo,
 )
 
@@ -48,6 +49,16 @@ if "scenario_configs" not in st.session_state:
     st.session_state.scenario_configs = {}  # name -> human-readable config summary
 
 UNLIMITED_CAP_SENTINEL = 999_999_999  # shown in the editor to mean "no contribution cap"
+
+US_STATES = [
+    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida",
+    "Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine",
+    "Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska",
+    "Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota",
+    "Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee",
+    "Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"
+]
+NO_INDIVIDUAL_INCOME_TAX_STATES = {"Alaska","Florida","Nevada","New Hampshire","South Dakota","Tennessee","Texas","Washington","Wyoming"}
 
 DEFAULT_ASSETS = pd.DataFrame(
     [
@@ -75,13 +86,51 @@ with st.sidebar:
     end_age = st.number_input("Simulate Until Age", min_value=int(start_age) + 1, max_value=120, value=90, step=1)
 
     st.header("💵 Income")
-    base_income = st.number_input("Current Annual Income ($)", min_value=0, max_value=10_000_000,
-                                   value=75000, step=1000)
+    income_entry_mode = st.radio(
+        "Income Entry Mode",
+        ["Gross income (estimate taxes)", "Post-tax income"],
+        help="Use gross income to estimate federal, payroll, and state taxes, or enter take-home income directly."
+    )
+    income_is_post_tax = income_entry_mode == "Post-tax income"
+    income_label = "Current Annual Post-Tax Income ($)" if income_is_post_tax else "Current Annual Gross Income ($)"
+    base_income = st.number_input(income_label, min_value=0, max_value=10_000_000, value=75000, step=1000)
+
+    filing_status = "Single"
+    state_name = "Alabama"
+    state_effective_tax_rate = 0.0
+    additional_deductions = 0.0
+    tax_rate = 0.0
+    if not income_is_post_tax:
+        filing_status = st.selectbox(
+            "Federal Filing Status",
+            ["Single", "Married Filing Jointly", "Married Filing Separately", "Head of Household"],
+        )
+        state_name = st.selectbox("State", US_STATES, index=US_STATES.index("Alabama"))
+        no_state_income_tax = state_name in NO_INDIVIDUAL_INCOME_TAX_STATES
+        state_effective_tax_rate = st.number_input(
+            "Estimated Effective State Income Tax Rate (%)",
+            min_value=0.0, max_value=20.0, value=0.0 if no_state_income_tax else 4.0, step=0.1,
+            disabled=no_state_income_tax,
+            help="State taxes vary by deductions, credits, local taxes, and progressive schedules. Use an effective rate for your situation."
+        ) / 100
+        additional_deductions = st.number_input(
+            "Additional Federal Deductions Beyond Standard Deduction ($)",
+            min_value=0, max_value=5_000_000, value=0, step=500,
+        )
+        tax_preview = estimate_income_taxes(
+            float(base_income), filing_status, state_effective_tax_rate, float(additional_deductions)
+        )
+        tax_rate = float(tax_preview["total_tax"] / base_income) if base_income else 0.0
+        st.caption(
+            f"Estimated current taxes: federal ${float(tax_preview['federal_income_tax']):,.0f} + "
+            f"payroll ${float(tax_preview['payroll_tax']):,.0f} + state ${float(tax_preview['state_income_tax']):,.0f} "
+            f"= ${float(tax_preview['total_tax']):,.0f}; estimated take-home ${float(tax_preview['after_tax_income']):,.0f}."
+        )
+
     income_growth = st.slider("Organic Annual Raise (%)", 0.0, 15.0, 2.0, 0.1,
                                help="Applied every year that doesn't have an explicit career change below.") / 100
     income_volatility = st.slider("Income Volatility (%)", 0.0, 40.0, 5.0, 0.5,
                                    help="Year-to-year randomness representing bonus/job-loss risk.") / 100
-    tax_rate = st.slider("Effective Tax Rate on Income (%)", 0.0, 50.0, 22.0, 1.0) / 100
     ordinary_withdrawal_tax_rate = st.slider("Tax Rate on Tax-Deferred Withdrawals (%)", 0.0, 50.0, 22.0, 1.0) / 100
     capital_gains_tax_rate = st.slider("Capital Gains Tax Rate (%)", 0.0, 40.0, 15.0, 1.0) / 100
     early_withdrawal_penalty_rate = st.slider("Early Retirement Withdrawal Penalty (%)", 0.0, 20.0, 10.0, 1.0) / 100
@@ -165,11 +214,18 @@ large_expenses_df = st.data_editor(
 # --------------------------------------------------------------------------
 st.subheader("📊 Savings & Investment Allocation")
 st.caption(
-    "Define where each year's leftover cash flow goes, and the expected growth characteristics of each asset. "
-    "Allocation % should total 100% (auto-normalized if not). 'Liquid' assets are drawn down first if expenses "
-    "exceed income in a given year; illiquid assets (IRA, real estate) are only tapped as a last resort. "
-    f"'Annual Contribution Cap' mirrors real contribution limits (e.g. an IRA) — leave at "
-    f"{UNLIMITED_CAP_SENTINEL:,} for unlimited; amounts above a cap automatically flow to uncapped assets instead."
+    "Define where each year's leftover cash flow goes. 'Lost Income' is money you intentionally leave "
+    "unallocated to model unplanned spending, emergencies, leakage, or other costs not captured elsewhere. "
+    "The remaining investable cash is allocated across the asset table below."
+)
+lost_income_pct = st.number_input(
+    "Lost Income / Unplanned Spending (% of positive leftover income)",
+    min_value=0.0, max_value=100.0, value=0.0, step=1.0,
+    help="This share of positive leftover cash flow is treated as spent/lost and does not increase net worth."
+) / 100
+st.caption(
+    "Asset Allocation % should total 100% of the cash remaining after Lost Income (auto-normalized if not). "
+    "'Liquid' assets are drawn down first during shortfalls. Contribution caps overflow into uncapped assets."
 )
 assets_df = st.data_editor(
     DEFAULT_ASSETS,
@@ -190,14 +246,39 @@ assets_df = st.data_editor(
 )
 
 st.subheader("🏘️ Real Estate")
-st.caption("Real estate is modeled separately: appreciation applies to full property value, the mortgage amortizes, rental cash flow includes vacancy and carrying costs, and only equity counts toward net worth.")
-real_estate_df = st.data_editor(
-    pd.DataFrame([{"Property": "Primary / Rental Property", "Property Value": 0, "Mortgage Balance": 0,
-                   "Mortgage Rate %": 6.5, "Mortgage Term Years": 30, "Appreciation %": 3.0,
-                   "Appreciation Volatility %": 8.0, "Market Beta": 0.35, "Annual Rent": 0,
-                   "Vacancy %": 5.0, "Property Tax %": 1.0, "Annual Insurance": 0, "Maintenance %": 1.0}]),
-    num_rows="dynamic", use_container_width=True, key="real_estate_editor",
+property_mode = st.radio(
+    "Property Setup",
+    ["Single Homestead", "Rental Property / Portfolio"],
+    horizontal=True,
+    help="Homestead mode hides rental-only inputs. Rental mode exposes rent, vacancy, and supports multiple properties."
 )
+base_property_df = pd.DataFrame([{
+    "Property": "Primary Residence" if property_mode == "Single Homestead" else "Rental Property",
+    "Property Value": 0, "Mortgage Balance": 0, "Mortgage Rate %": 6.5, "Mortgage Term Years": 30,
+    "Appreciation %": 3.0, "Appreciation Volatility %": 8.0, "Market Beta": 0.35,
+    "Annual Rent": 0, "Vacancy %": 5.0, "Property Tax %": 1.0, "Annual Insurance": 0, "Maintenance %": 1.0
+}])
+if property_mode == "Single Homestead":
+    st.caption("Simple owner-occupied home model: property value, mortgage, appreciation, taxes, insurance, and maintenance. Rental assumptions are omitted.")
+    real_estate_df = st.data_editor(
+        base_property_df,
+        num_rows="fixed",
+        use_container_width=True,
+        key="homestead_editor",
+        column_order=[
+            "Property", "Property Value", "Mortgage Balance", "Mortgage Rate %", "Mortgage Term Years",
+            "Appreciation %", "Appreciation Volatility %", "Market Beta", "Property Tax %",
+            "Annual Insurance", "Maintenance %"
+        ],
+    )
+else:
+    st.caption("Rental mode includes vacancy-adjusted rent and carrying costs, and supports multiple properties.")
+    real_estate_df = st.data_editor(
+        base_property_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="rental_property_editor",
+    )
 
 alloc_sum = pd.to_numeric(assets_df["Allocation %"], errors="coerce").sum()
 if alloc_sum > 0 and abs(alloc_sum - 100) > 0.5:
@@ -292,6 +373,11 @@ if run_clicked:
         large_expenses=large_expenses,
         assets=assets,
         real_estate=real_estate,
+        income_is_post_tax=income_is_post_tax,
+        filing_status=filing_status,
+        state_effective_tax_rate=state_effective_tax_rate,
+        additional_deductions=float(additional_deductions),
+        lost_income_pct=lost_income_pct,
         market_autocorrelation=market_autocorrelation,
         num_simulations=int(num_sims),
         seed=seed,
@@ -304,6 +390,8 @@ if run_clicked:
     st.session_state.scenarios[name] = result
     st.session_state.scenario_configs[name] = {
         "Start Age": start_age, "End Age": end_age, "Base Income": base_income,
+        "Income Mode": income_entry_mode, "Property Mode": property_mode,
+        "Lost Income %": lost_income_pct * 100,
         "Base Expenses": base_expenses, "# Simulations": num_sims,
     }
     st.success(f"Scenario **{name}** simulated across {num_sims:,} possible futures!")
@@ -417,19 +505,22 @@ if st.session_state.scenarios:
             st.caption(
                 "Sanity-check your assumptions here: this shows the *expected* year-by-year cash flow — gross "
                 "income, after-tax income, recurring expenses (including any cost-of-living changes), and large "
-                "one-time expenses — independent of investment-return randomness. Income volatility is not "
-                "reflected here since it varies per simulation; this is the average path around which each "
-                "simulation's income randomly fluctuates."
+                "one-time expenses, and expected lost-income reserve — independent of investment-return randomness. "
+                "Income volatility is not reflected here since it varies per simulation; this is the average path "
+                "around which each simulation's income randomly fluctuates."
             )
+            income_col = "Post-Tax Income Entered" if res.get("income_is_post_tax", False) else "Gross Income"
             cash_flow_df = pd.DataFrame({
                 "Age": res["ages"],
-                "Gross Income": res["income_path"],
+                income_col: res["income_path"],
                 "After-Tax Income": res["after_tax_income_path"],
                 "Recurring Expenses": res["expense_path"],
                 "Large Expenses": res["large_expense_path"],
+                "Lost Income / Unplanned Spending": res.get("expected_lost_income_path", np.zeros(len(res["ages"]))),
             })
-            cash_flow_df["Net Leftover"] = (
-                cash_flow_df["After-Tax Income"] - cash_flow_df["Recurring Expenses"] - cash_flow_df["Large Expenses"]
+            cash_flow_df["Net Leftover for Saving/Investing"] = (
+                cash_flow_df["After-Tax Income"] - cash_flow_df["Recurring Expenses"]
+                - cash_flow_df["Large Expenses"] - cash_flow_df["Lost Income / Unplanned Spending"]
             )
             st.dataframe(
                 cash_flow_df.style.format({c: "${:,.0f}" for c in cash_flow_df.columns if c != "Age"}),
