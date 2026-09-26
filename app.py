@@ -373,6 +373,11 @@ if run_clicked:
         large_expenses=large_expenses,
         assets=assets,
         real_estate=real_estate,
+        income_is_post_tax=income_is_post_tax,
+        filing_status=filing_status,
+        state_effective_tax_rate=state_effective_tax_rate,
+        additional_deductions=float(additional_deductions),
+        lost_income_pct=lost_income_pct,
         market_autocorrelation=market_autocorrelation,
         num_simulations=int(num_sims),
         seed=seed,
@@ -385,6 +390,8 @@ if run_clicked:
     st.session_state.scenarios[name] = result
     st.session_state.scenario_configs[name] = {
         "Start Age": start_age, "End Age": end_age, "Base Income": base_income,
+        "Income Mode": income_entry_mode, "Property Mode": property_mode,
+        "Lost Income %": lost_income_pct * 100,
         "Base Expenses": base_expenses, "# Simulations": num_sims,
     }
     st.success(f"Scenario **{name}** simulated across {num_sims:,} possible futures!")
@@ -498,19 +505,22 @@ if st.session_state.scenarios:
             st.caption(
                 "Sanity-check your assumptions here: this shows the *expected* year-by-year cash flow — gross "
                 "income, after-tax income, recurring expenses (including any cost-of-living changes), and large "
-                "one-time expenses — independent of investment-return randomness. Income volatility is not "
-                "reflected here since it varies per simulation; this is the average path around which each "
-                "simulation's income randomly fluctuates."
+                "one-time expenses, and expected lost-income reserve — independent of investment-return randomness. "
+                "Income volatility is not reflected here since it varies per simulation; this is the average path "
+                "around which each simulation's income randomly fluctuates."
             )
+            income_col = "Post-Tax Income Entered" if res.get("income_is_post_tax", False) else "Gross Income"
             cash_flow_df = pd.DataFrame({
                 "Age": res["ages"],
-                "Gross Income": res["income_path"],
+                income_col: res["income_path"],
                 "After-Tax Income": res["after_tax_income_path"],
                 "Recurring Expenses": res["expense_path"],
                 "Large Expenses": res["large_expense_path"],
+                "Lost Income / Unplanned Spending": res.get("expected_lost_income_path", np.zeros(len(res["ages"]))),
             })
-            cash_flow_df["Net Leftover"] = (
-                cash_flow_df["After-Tax Income"] - cash_flow_df["Recurring Expenses"] - cash_flow_df["Large Expenses"]
+            cash_flow_df["Net Leftover for Saving/Investing"] = (
+                cash_flow_df["After-Tax Income"] - cash_flow_df["Recurring Expenses"]
+                - cash_flow_df["Large Expenses"] - cash_flow_df["Lost Income / Unplanned Spending"]
             )
             st.dataframe(
                 cash_flow_df.style.format({c: "${:,.0f}" for c in cash_flow_df.columns if c != "Age"}),
