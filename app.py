@@ -214,11 +214,18 @@ large_expenses_df = st.data_editor(
 # --------------------------------------------------------------------------
 st.subheader("📊 Savings & Investment Allocation")
 st.caption(
-    "Define where each year's leftover cash flow goes, and the expected growth characteristics of each asset. "
-    "Allocation % should total 100% (auto-normalized if not). 'Liquid' assets are drawn down first if expenses "
-    "exceed income in a given year; illiquid assets (IRA, real estate) are only tapped as a last resort. "
-    f"'Annual Contribution Cap' mirrors real contribution limits (e.g. an IRA) — leave at "
-    f"{UNLIMITED_CAP_SENTINEL:,} for unlimited; amounts above a cap automatically flow to uncapped assets instead."
+    "Define where each year's leftover cash flow goes. 'Lost Income' is money you intentionally leave "
+    "unallocated to model unplanned spending, emergencies, leakage, or other costs not captured elsewhere. "
+    "The remaining investable cash is allocated across the asset table below."
+)
+lost_income_pct = st.number_input(
+    "Lost Income / Unplanned Spending (% of positive leftover income)",
+    min_value=0.0, max_value=100.0, value=0.0, step=1.0,
+    help="This share of positive leftover cash flow is treated as spent/lost and does not increase net worth."
+) / 100
+st.caption(
+    "Asset Allocation % should total 100% of the cash remaining after Lost Income (auto-normalized if not). "
+    "'Liquid' assets are drawn down first during shortfalls. Contribution caps overflow into uncapped assets."
 )
 assets_df = st.data_editor(
     DEFAULT_ASSETS,
@@ -239,14 +246,39 @@ assets_df = st.data_editor(
 )
 
 st.subheader("🏘️ Real Estate")
-st.caption("Real estate is modeled separately: appreciation applies to full property value, the mortgage amortizes, rental cash flow includes vacancy and carrying costs, and only equity counts toward net worth.")
-real_estate_df = st.data_editor(
-    pd.DataFrame([{"Property": "Primary / Rental Property", "Property Value": 0, "Mortgage Balance": 0,
-                   "Mortgage Rate %": 6.5, "Mortgage Term Years": 30, "Appreciation %": 3.0,
-                   "Appreciation Volatility %": 8.0, "Market Beta": 0.35, "Annual Rent": 0,
-                   "Vacancy %": 5.0, "Property Tax %": 1.0, "Annual Insurance": 0, "Maintenance %": 1.0}]),
-    num_rows="dynamic", use_container_width=True, key="real_estate_editor",
+property_mode = st.radio(
+    "Property Setup",
+    ["Single Homestead", "Rental Property / Portfolio"],
+    horizontal=True,
+    help="Homestead mode hides rental-only inputs. Rental mode exposes rent, vacancy, and supports multiple properties."
 )
+base_property_df = pd.DataFrame([{
+    "Property": "Primary Residence" if property_mode == "Single Homestead" else "Rental Property",
+    "Property Value": 0, "Mortgage Balance": 0, "Mortgage Rate %": 6.5, "Mortgage Term Years": 30,
+    "Appreciation %": 3.0, "Appreciation Volatility %": 8.0, "Market Beta": 0.35,
+    "Annual Rent": 0, "Vacancy %": 5.0, "Property Tax %": 1.0, "Annual Insurance": 0, "Maintenance %": 1.0
+}])
+if property_mode == "Single Homestead":
+    st.caption("Simple owner-occupied home model: property value, mortgage, appreciation, taxes, insurance, and maintenance. Rental assumptions are omitted.")
+    real_estate_df = st.data_editor(
+        base_property_df,
+        num_rows="fixed",
+        use_container_width=True,
+        key="homestead_editor",
+        column_order=[
+            "Property", "Property Value", "Mortgage Balance", "Mortgage Rate %", "Mortgage Term Years",
+            "Appreciation %", "Appreciation Volatility %", "Market Beta", "Property Tax %",
+            "Annual Insurance", "Maintenance %"
+        ],
+    )
+else:
+    st.caption("Rental mode includes vacancy-adjusted rent and carrying costs, and supports multiple properties.")
+    real_estate_df = st.data_editor(
+        base_property_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="rental_property_editor",
+    )
 
 alloc_sum = pd.to_numeric(assets_df["Allocation %"], errors="coerce").sum()
 if alloc_sum > 0 and abs(alloc_sum - 100) > 0.5:
