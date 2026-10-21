@@ -22,6 +22,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dataclasses import asdict
+import json
+
 from simulation import (
     AssetClass,
     RealEstateAsset,
@@ -34,11 +37,11 @@ from simulation import (
     run_monte_carlo,
 )
 
-st.set_page_config(page_title="Lifetime Financial Simulator", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Financial Planner", page_icon="💰", layout="wide")
 
-st.title("💰 Lifetime Financial Simulator")
+st.title("💰 Financial Planner")
 st.caption(
-    "Model your net worth across your lifetime with Monte Carlo simulation. "
+    "Plan the next 5 or 10 years, or explore a longer horizon with Monte Carlo simulation. "
     "Adjust income, expenses, big life purchases, and how you split savings across "
     "different asset classes to see a *range* of possible financial futures — not just one guess."
 )
@@ -83,7 +86,12 @@ DEFAULT_ASSETS = pd.DataFrame(
 with st.sidebar:
     st.header("⏳ Time Range")
     start_age = st.number_input("Current Age", min_value=16, max_value=100, value=30, step=1)
-    end_age = st.number_input("Simulate Until Age", min_value=int(start_age) + 1, max_value=120, value=90, step=1)
+    horizon = st.radio("Planning horizon", ["5 years", "10 years", "Custom"], index=1, horizontal=True)
+    horizon_years = 5 if horizon == "5 years" else 10
+    end_age = st.number_input("Simulate Until Age", min_value=int(start_age) + 1, max_value=120, value=min(int(start_age) + horizon_years, 120), step=1, disabled=horizon != "Custom")
+    if horizon != "Custom":
+        end_age = min(int(start_age) + horizon_years, 120)
+    st.caption("Today is the starting balance sheet. Each later age is a year-end result; future events use the age shown at that year end.")
 
     st.header("💵 Income")
     income_entry_mode = st.radio(
@@ -130,7 +138,7 @@ with st.sidebar:
     income_growth = st.slider("Organic Annual Raise (%)", 0.0, 15.0, 2.0, 0.1,
                                help="Applied every year that doesn't have an explicit career change below.") / 100
     income_volatility = st.slider("Income Volatility (%)", 0.0, 40.0, 5.0, 0.5,
-                                   help="Year-to-year randomness representing bonus/job-loss risk.") / 100
+                                   help="Temporary pay/bonus variation. Model unemployment separately below.") / 100
     ordinary_withdrawal_tax_rate = st.slider("Tax Rate on Tax-Deferred Withdrawals (%)", 0.0, 50.0, 22.0, 1.0) / 100
     capital_gains_tax_rate = st.slider("Capital Gains Tax Rate (%)", 0.0, 40.0, 15.0, 1.0) / 100
     early_withdrawal_penalty_rate = st.slider("Early Retirement Withdrawal Penalty (%)", 0.0, 20.0, 10.0, 1.0) / 100
@@ -143,26 +151,51 @@ with st.sidebar:
 
     st.header("🎲 Monte Carlo Settings")
     num_sims = st.select_slider("Number of Simulations", options=[100, 500, 1000, 2000, 5000], value=1000)
-    market_autocorrelation = st.slider("Market Shock Persistence", 0.0, 0.8, 0.25, 0.05,
-        help="Correlates broad market shocks across adjacent years; 0 means no year-to-year persistence.") 
+    market_autocorrelation = st.slider("Market Shock Persistence", 0.0, 0.8, 0.0, 0.05,
+        help="Correlates broad market shocks across adjacent years; 0 is the default. Positive persistence is a sensitivity assumption, not a calibrated forecast.")
     use_seed = st.checkbox("Use fixed random seed (reproducible results)", value=True)
     seed = 42 if use_seed else None
 
 # --------------------------------------------------------------------------
 # Career path / income changes
 # --------------------------------------------------------------------------
+st.info("Start with your current balances, take-home pay and spending. Choose a 5- or 10-year horizon, then add dated changes. The ranges depend on your assumptions; they are not validated forecasts.")
+
+with st.sidebar.expander("Cash reserve, debt and shocks", expanded=True):
+    emergency_fund_months = st.number_input("Target emergency cash (months of living expenses)", 0.0, 24.0, 3.0, 0.5)
+    initial_debt = st.number_input("Current non-mortgage debt ($)", 0.0, 100_000_000.0, 0.0, 1000.0)
+    debt_interest_rate = st.number_input("Non-mortgage debt APR (%)", 0.0, 100.0, 10.0, 0.5) / 100
+    annual_debt_payment = st.number_input("Required annual non-mortgage debt payments ($)", 0.0, 10_000_000.0, 0.0, 500.0)
+    st.caption("Exclude these payments from living expenses. Surplus pays down this debt first, then refills emergency cash. Unfunded costs become new borrowing at this APR; borrowing capacity is assumed unlimited and flagged in results.")
+    unemployment_probability = st.slider("Annual chance of an unemployment spell (%)", 0, 100, 0) / 100
+    unemployment_months = st.slider("Months of pay lost during a spell", 0, 12, 3)
+    emergency_probability = st.slider("Annual chance of a large unexpected bill (%)", 0, 100, 0) / 100
+    emergency_cost = st.number_input("Unexpected bill in today's dollars ($)", 0.0, 10_000_000.0, 5000.0, 500.0)
+    inflation_volatility = st.slider("Inflation uncertainty (annual percentage points)", 0.0, 10.0, 0.0, 0.5) / 100
+    expense_volatility = st.slider("Temporary annual spending variation (%)", 0.0, 50.0, 0.0, 1.0) / 100
+
+with st.sidebar.expander("Retirement and tax assumptions"):
+    enable_retirement = st.checkbox("Stop employment income at retirement")
+    retirement_age = st.number_input("Retirement year-end age", int(start_age), 120, max(int(start_age), 65)) if enable_retirement else None
+    retirement_net_income = st.number_input("Annual retirement take-home income (today's dollars)", 0.0, 10_000_000.0, 0.0, 1000.0)
+    st.caption("Enter net pension / Social Security income here; portfolio withdrawals are calculated separately.")
+    allow_retirement_withdrawals = st.checkbox("Allow early withdrawals from retirement / illiquid accounts", value=False)
+    st.caption("Retirement accounts become available at your selected retirement age. Before then, this switch permits early access; otherwise cash shortages create borrowing. Tax-free account access is simplified; Roth qualification and ordering rules are not modeled.")
+    index_tax_thresholds = st.checkbox("Adjust federal brackets, standard deduction and Social Security wage cap with inflation", value=True)
+    st.caption("A planning assumption, not a prediction of future tax law. State taxes use your effective rate; deductions, retirement contributions and withdrawal tax rates remain simplified.")
+
 st.subheader("📈 Career Path: Income Changes")
 st.caption(
     "Model raises, job changes, or income loss at specific ages. Each row overrides your income "
     "starting that age; organic growth resumes from the new value until the next change."
 )
 income_changes_df = st.data_editor(
-    pd.DataFrame([{"Age": int(start_age) + 5, "New Annual Income": float(base_income) * 1.3, "Note": "Promotion"}]),
+    pd.DataFrame(columns=["Age", "New Annual Income", "Note"]),
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     key="income_changes_editor",
     column_config={
-        "Age": st.column_config.NumberColumn(min_value=int(start_age), max_value=int(end_age), step=1),
+        "Age": st.column_config.NumberColumn(min_value=int(start_age)+1, max_value=int(end_age), step=1),
         "New Annual Income": st.column_config.NumberColumn(min_value=0, step=1000, format="$%d"),
     },
 )
@@ -177,13 +210,12 @@ st.caption(
     "expense baseline starting that age; inflation keeps compounding from the new baseline afterward."
 )
 expense_changes_df = st.data_editor(
-    pd.DataFrame([{"Age": int(start_age) + 10, "New Annual Expenses": float(base_expenses) * 1.6,
-                   "Note": "Relocated to a higher cost-of-living city"}]),
+    pd.DataFrame(columns=["Age", "New Annual Expenses", "Note"]),
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     key="expense_changes_editor",
     column_config={
-        "Age": st.column_config.NumberColumn(min_value=int(start_age), max_value=int(end_age), step=1),
+        "Age": st.column_config.NumberColumn(min_value=int(start_age)+1, max_value=int(end_age), step=1),
         "New Annual Expenses": st.column_config.NumberColumn(min_value=0, step=1000, format="$%d"),
     },
 )
@@ -192,19 +224,14 @@ expense_changes_df = st.data_editor(
 # Large one-time expenses
 # --------------------------------------------------------------------------
 st.subheader("🏠 Large One-Time Expenses")
-st.caption("Model big purchases or events: home down payment, wedding, education, medical costs, a new car, etc.")
+st.caption("Model one-time spending such as education, medical bills, or a car. Enter home purchases in Real Estate so equity and mortgage debt are created together.")
 large_expenses_df = st.data_editor(
-    pd.DataFrame(
-        [
-            {"Age": int(start_age) + 7, "Amount": 60000, "Description": "House down payment"},
-            {"Age": int(start_age) + 20, "Amount": 30000, "Description": "Kid's education"},
-        ]
-    ),
+    pd.DataFrame(columns=["Age", "Amount", "Description"]),
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     key="large_expenses_editor",
     column_config={
-        "Age": st.column_config.NumberColumn(min_value=int(start_age), max_value=int(end_age), step=1),
+        "Age": st.column_config.NumberColumn(min_value=int(start_age)+1, max_value=int(end_age), step=1),
         "Amount": st.column_config.NumberColumn(min_value=0, step=1000, format="$%d"),
     },
 )
@@ -224,13 +251,17 @@ lost_income_pct = st.number_input(
     help="This share of positive leftover cash flow is treated as spent/lost and does not increase net worth."
 ) / 100
 st.caption(
-    "Asset Allocation % should total 100% of the cash remaining after Lost Income (auto-normalized if not). "
+    "Emergency cash is filled before investing. Allocation percentages direct new contributions, not portfolio rebalancing. Asset Allocation % should total 100% of the cash remaining after Lost Income (auto-normalized if not). "
     "'Liquid' assets are drawn down first during shortfalls. Contribution caps overflow into uncapped assets."
 )
+st.caption("Expected Return is the arithmetic mean annual nominal return before the fees / tax drag entered below. Market Beta is a shared shock loading, not conventional stock beta. Tax drag is an approximate annual reduction, not a tax return calculation.")
+asset_defaults = DEFAULT_ASSETS.copy()
+asset_defaults["Annual Fee %"] = 0.0
+asset_defaults["Annual Tax Drag %"] = 0.0
 assets_df = st.data_editor(
-    DEFAULT_ASSETS,
+    asset_defaults,
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     key="assets_editor",
     column_config={
         "Initial Balance": st.column_config.NumberColumn(min_value=0, step=500, format="$%d"),
@@ -242,6 +273,8 @@ assets_df = st.data_editor(
         "Market Beta": st.column_config.NumberColumn(min_value=0.0, max_value=0.99, step=0.05),
         "Cost Basis": st.column_config.NumberColumn(min_value=0, step=500, format="$%d"),
         "Annual Contribution Cap": st.column_config.NumberColumn(min_value=0, step=500, format="$%d"),
+        "Annual Fee %": st.column_config.NumberColumn(min_value=0.0, max_value=20.0, step=0.05),
+        "Annual Tax Drag %": st.column_config.NumberColumn(min_value=0.0, max_value=20.0, step=0.1),
     },
 )
 
@@ -255,6 +288,7 @@ property_mode = st.radio(
 base_property_df = pd.DataFrame([{
     "Property": "Primary Residence" if property_mode == "Single Homestead" else "Rental Property",
     "Property Value": 0, "Mortgage Balance": 0, "Mortgage Rate %": 6.5, "Mortgage Term Years": 30,
+    "Purchase Age (0 = owned now)": 0, "Closing Cost %": 3.0,
     "Appreciation %": 3.0, "Appreciation Volatility %": 8.0, "Market Beta": 0.35,
     "Annual Rent": 0, "Vacancy %": 5.0, "Property Tax %": 1.0, "Annual Insurance": 0, "Maintenance %": 1.0
 }])
@@ -263,10 +297,11 @@ if property_mode == "Single Homestead":
     real_estate_df = st.data_editor(
         base_property_df,
         num_rows="fixed",
-        use_container_width=True,
+        width="stretch",
         key="homestead_editor",
         column_order=[
             "Property", "Property Value", "Mortgage Balance", "Mortgage Rate %", "Mortgage Term Years",
+            "Purchase Age (0 = owned now)", "Closing Cost %",
             "Appreciation %", "Appreciation Volatility %", "Market Beta", "Property Tax %",
             "Annual Insurance", "Maintenance %"
         ],
@@ -276,9 +311,18 @@ else:
     real_estate_df = st.data_editor(
         base_property_df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         key="rental_property_editor",
     )
+
+st.caption("For a future property, enter its purchase year-end age, expected nominal purchase price and initial mortgage. Down payment and closing costs are deducted automatically; do not repeat them as large expenses. Ownership costs start the following year. Exclude modeled mortgage payments, property tax, insurance and maintenance from living expenses; remove rent with a dated expense change when appropriate.")
+
+st.subheader("🎯 Planning goal and stress test")
+goal_type = st.radio("Goal measure", ["Liquid assets", "Net worth", "Cash reserve"], horizontal=True)
+goal_amount = st.number_input("Goal at the end of the plan (today's dollars)", 0.0, 1_000_000_000.0, 100000.0, 5000.0)
+stress_test = st.checkbox("Also run a first-year market decline", value=True)
+stress_decline = st.slider("First-year broad market decline (%)", -60, 0, -30, 5) / 100
+st.caption("The stress run replaces first-year asset returns with the decline multiplied by each asset's shared shock loading; property appreciation is unchanged. Later years resume the model. This is a hypothetical sensitivity test, not a historical replay or an assigned crash probability.")
 
 alloc_sum = pd.to_numeric(assets_df["Allocation %"], errors="coerce").sum()
 if alloc_sum > 0 and abs(alloc_sum - 100) > 0.5:
@@ -291,8 +335,8 @@ if alloc_sum > 0 and abs(alloc_sum - 100) > 0.5:
 st.divider()
 scenario_name = st.text_input("Scenario Name", value=f"Scenario {len(st.session_state.scenarios) + 1}")
 run_col1, run_col2 = st.columns([1, 1])
-run_clicked = run_col1.button("🚀 Run Simulation", type="primary", use_container_width=True)
-clear_clicked = run_col2.button("🗑️ Clear All Scenarios", use_container_width=True)
+run_clicked = run_col1.button("🚀 Run Simulation", type="primary", width="stretch")
+clear_clicked = run_col2.button("🗑️ Clear All Scenarios", width="stretch")
 
 if clear_clicked:
     st.session_state.scenarios = {}
@@ -300,101 +344,126 @@ if clear_clicked:
     st.rerun()
 
 if run_clicked:
-    income_changes = [
-        IncomeChange(age=int(r["Age"]), new_annual_income=float(r["New Annual Income"]),
-                     description=str(r.get("Note", "") or ""))
-        for _, r in income_changes_df.dropna(subset=["Age", "New Annual Income"]).iterrows()
-    ]
-    expense_changes = [
-        ExpenseChange(age=int(r["Age"]), new_annual_expenses=float(r["New Annual Expenses"]),
-                      description=str(r.get("Note", "") or ""))
-        for _, r in expense_changes_df.dropna(subset=["Age", "New Annual Expenses"]).iterrows()
-    ]
-    large_expenses = [
-        LargeExpense(age=int(r["Age"]), amount=float(r["Amount"]),
-                     description=str(r.get("Description", "") or ""))
-        for _, r in large_expenses_df.dropna(subset=["Age", "Amount"]).iterrows()
-    ]
+    try:
+        income_changes = [
+            IncomeChange(age=int(r["Age"]), new_annual_income=float(r["New Annual Income"]),
+                         description=str(r.get("Note", "") or ""))
+            for _, r in income_changes_df.dropna(subset=["Age", "New Annual Income"]).iterrows()
+        ]
+        expense_changes = [
+            ExpenseChange(age=int(r["Age"]), new_annual_expenses=float(r["New Annual Expenses"]),
+                          description=str(r.get("Note", "") or ""))
+            for _, r in expense_changes_df.dropna(subset=["Age", "New Annual Expenses"]).iterrows()
+        ]
+        large_expenses = [
+            LargeExpense(age=int(r["Age"]), amount=float(r["Amount"]),
+                         description=str(r.get("Description", "") or ""))
+            for _, r in large_expenses_df.dropna(subset=["Age", "Amount"]).iterrows()
+        ]
 
-    valid_assets_df = assets_df.dropna(subset=["Asset Class", "Initial Balance", "Allocation %",
-                                                 "Expected Return %", "Volatility %"])
-    total_alloc = pd.to_numeric(valid_assets_df["Allocation %"], errors="coerce").sum()
-    assets = []
-    for _, r in valid_assets_df.iterrows():
-        raw_alloc = float(r["Allocation %"])
-        alloc_pct = raw_alloc / total_alloc if total_alloc > 0 else 0.0
-        cap_raw = r.get("Annual Contribution Cap", UNLIMITED_CAP_SENTINEL)
-        cap_raw = UNLIMITED_CAP_SENTINEL if pd.isna(cap_raw) else float(cap_raw)
-        contribution_cap = None if cap_raw <= 0 or cap_raw >= UNLIMITED_CAP_SENTINEL else cap_raw
-        assets.append(
-            AssetClass(
-                name=str(r["Asset Class"]),
-                initial_balance=float(r["Initial Balance"]),
-                allocation_pct=alloc_pct,
-                expected_return=float(r["Expected Return %"]) / 100,
-                volatility=float(r["Volatility %"]) / 100,
-                liquidity="liquid" if bool(r.get("Liquid", True)) else "illiquid",
-                annual_contribution_cap=contribution_cap,
-                account_type=str(r.get("Account Type", "taxable")),
-                market_beta=float(r.get("Market Beta", 0.7)),
-                capital_gains_tax_rate=capital_gains_tax_rate,
-                cost_basis=float(r.get("Cost Basis", r["Initial Balance"])) if not pd.isna(r.get("Cost Basis", r["Initial Balance"])) else float(r["Initial Balance"]),
+        valid_assets_df = assets_df.dropna(subset=["Asset Class", "Initial Balance", "Allocation %",
+                                                     "Expected Return %", "Volatility %"])
+        total_alloc = pd.to_numeric(valid_assets_df["Allocation %"], errors="coerce").sum()
+        assets = []
+        for _, r in valid_assets_df.iterrows():
+            raw_alloc = float(r["Allocation %"])
+            alloc_pct = raw_alloc / total_alloc if total_alloc > 0 else 0.0
+            cap_raw = r.get("Annual Contribution Cap", UNLIMITED_CAP_SENTINEL)
+            cap_raw = UNLIMITED_CAP_SENTINEL if pd.isna(cap_raw) else float(cap_raw)
+            contribution_cap = None if cap_raw >= UNLIMITED_CAP_SENTINEL else cap_raw
+            assets.append(
+                AssetClass(
+                    name=str(r["Asset Class"]),
+                    initial_balance=float(r["Initial Balance"]),
+                    allocation_pct=alloc_pct,
+                    expected_return=float(r["Expected Return %"]) / 100,
+                    volatility=float(r["Volatility %"]) / 100,
+                    liquidity="liquid" if bool(r.get("Liquid", True)) else "illiquid",
+                    annual_contribution_cap=contribution_cap,
+                    account_type=str(r.get("Account Type", "taxable")),
+                    market_beta=float(r.get("Market Beta", 0.7)),
+                    capital_gains_tax_rate=capital_gains_tax_rate,
+                    annual_fee=float(r.get("Annual Fee %", 0)) / 100,
+                    annual_tax_drag=float(r.get("Annual Tax Drag %", 0)) / 100,
+                    cost_basis=float(r.get("Cost Basis", r["Initial Balance"])) if not pd.isna(r.get("Cost Basis", r["Initial Balance"])) else float(r["Initial Balance"]),
+                )
             )
+
+        real_estate = []
+        for _, r in real_estate_df.dropna(subset=["Property", "Property Value"]).iterrows():
+            if float(r["Property Value"]) <= 0:
+                continue
+            real_estate.append(RealEstateAsset(
+                name=str(r["Property"]), property_value=float(r["Property Value"]),
+                mortgage_balance=float(r.get("Mortgage Balance", 0)), mortgage_rate=float(r.get("Mortgage Rate %", 0))/100,
+                mortgage_term_years=int(r.get("Mortgage Term Years", 30)), appreciation_rate=float(r.get("Appreciation %", 3))/100,
+                appreciation_volatility=float(r.get("Appreciation Volatility %", 8))/100, market_beta=float(r.get("Market Beta", 0.35)),
+                annual_rent=float(r.get("Annual Rent", 0)), vacancy_rate=float(r.get("Vacancy %", 5))/100,
+                property_tax_rate=float(r.get("Property Tax %", 1))/100, annual_insurance=float(r.get("Annual Insurance", 0)),
+                maintenance_rate=float(r.get("Maintenance %", 1))/100,
+                purchase_age=int(r.get("Purchase Age (0 = owned now)", 0)) or None,
+                closing_cost_rate=float(r.get("Closing Cost %", 3))/100,
+            ))
+
+        config = SimulationConfig(
+            start_age=int(start_age),
+            end_age=int(end_age),
+            base_income=float(base_income),
+            income_growth_rate=income_growth,
+            income_changes=income_changes,
+            income_volatility=income_volatility,
+            tax_rate=tax_rate,
+            ordinary_withdrawal_tax_rate=ordinary_withdrawal_tax_rate,
+            capital_gains_tax_rate=capital_gains_tax_rate,
+            early_withdrawal_penalty_rate=early_withdrawal_penalty_rate,
+            base_expenses=float(base_expenses),
+            expense_inflation=expense_inflation,
+            expense_changes=expense_changes,
+            large_expenses=large_expenses,
+            assets=assets,
+            real_estate=real_estate,
+            income_is_post_tax=income_is_post_tax,
+            filing_status=filing_status,
+            state_effective_tax_rate=state_effective_tax_rate,
+            additional_deductions=float(additional_deductions),
+            lost_income_pct=lost_income_pct,
+            market_autocorrelation=market_autocorrelation,
+            inflation_volatility=inflation_volatility, expense_volatility=expense_volatility,
+            unemployment_probability=unemployment_probability, unemployment_months=unemployment_months,
+            emergency_probability=emergency_probability, emergency_cost=emergency_cost,
+            initial_debt=initial_debt, debt_interest_rate=debt_interest_rate,
+            annual_debt_payment=annual_debt_payment, emergency_fund_months=emergency_fund_months,
+            allow_retirement_withdrawals=allow_retirement_withdrawals,
+            retirement_age=int(retirement_age) if retirement_age is not None else None,
+            retirement_annual_net_income=retirement_net_income, index_tax_thresholds=index_tax_thresholds,
+            num_simulations=int(num_sims),
+            seed=seed,
         )
 
-    real_estate = []
-    for _, r in real_estate_df.dropna(subset=["Property", "Property Value"]).iterrows():
-        if float(r["Property Value"]) <= 0:
-            continue
-        real_estate.append(RealEstateAsset(
-            name=str(r["Property"]), property_value=float(r["Property Value"]),
-            mortgage_balance=float(r.get("Mortgage Balance", 0)), mortgage_rate=float(r.get("Mortgage Rate %", 0))/100,
-            mortgage_term_years=int(r.get("Mortgage Term Years", 30)), appreciation_rate=float(r.get("Appreciation %", 3))/100,
-            appreciation_volatility=float(r.get("Appreciation Volatility %", 8))/100, market_beta=float(r.get("Market Beta", 0.35)),
-            annual_rent=float(r.get("Annual Rent", 0)), vacancy_rate=float(r.get("Vacancy %", 5))/100,
-            property_tax_rate=float(r.get("Property Tax %", 1))/100, annual_insurance=float(r.get("Annual Insurance", 0)),
-            maintenance_rate=float(r.get("Maintenance %", 1))/100,
-        ))
+        with st.spinner(f"Running {num_sims:,} simulated plans..."):
+            try:
+                result = run_monte_carlo(config)
+                result["configuration"] = asdict(config)
+                result["goal_type"], result["goal_amount"] = goal_type, goal_amount
+                if stress_test:
+                    from dataclasses import replace
+                    result["stress_result"] = run_monte_carlo(replace(config, stress_first_year_return=stress_decline))
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
 
-    config = SimulationConfig(
-        start_age=int(start_age),
-        end_age=int(end_age),
-        base_income=float(base_income),
-        income_growth_rate=income_growth,
-        income_changes=income_changes,
-        income_volatility=income_volatility,
-        tax_rate=tax_rate,
-        ordinary_withdrawal_tax_rate=ordinary_withdrawal_tax_rate,
-        capital_gains_tax_rate=capital_gains_tax_rate,
-        early_withdrawal_penalty_rate=early_withdrawal_penalty_rate,
-        base_expenses=float(base_expenses),
-        expense_inflation=expense_inflation,
-        expense_changes=expense_changes,
-        large_expenses=large_expenses,
-        assets=assets,
-        real_estate=real_estate,
-        income_is_post_tax=income_is_post_tax,
-        filing_status=filing_status,
-        state_effective_tax_rate=state_effective_tax_rate,
-        additional_deductions=float(additional_deductions),
-        lost_income_pct=lost_income_pct,
-        market_autocorrelation=market_autocorrelation,
-        num_simulations=int(num_sims),
-        seed=seed,
-    )
-
-    with st.spinner(f"Running {num_sims:,} simulated lifetimes..."):
-        result = run_monte_carlo(config)
-
-    name = scenario_name or f"Scenario {len(st.session_state.scenarios) + 1}"
-    st.session_state.scenarios[name] = result
-    st.session_state.scenario_configs[name] = {
-        "Start Age": start_age, "End Age": end_age, "Base Income": base_income,
-        "Income Mode": income_entry_mode, "Property Mode": property_mode,
-        "Lost Income %": lost_income_pct * 100,
-        "Base Expenses": base_expenses, "# Simulations": num_sims,
-    }
-    st.success(f"Scenario **{name}** simulated across {num_sims:,} possible futures!")
+        name = scenario_name or f"Scenario {len(st.session_state.scenarios) + 1}"
+        st.session_state.scenarios[name] = result
+        st.session_state.scenario_configs[name] = {
+            "Start Age": start_age, "End Age": end_age, "Base Income": base_income,
+            "Income Mode": income_entry_mode, "Property Mode": property_mode,
+            "Lost Income %": lost_income_pct * 100,
+            "Base Expenses": base_expenses, "# Simulations": num_sims,
+        }
+        st.success(f"Scenario **{name}** simulated across {num_sims:,} possible futures!")
+    except (ValueError, TypeError, OverflowError) as exc:
+        st.error(f"Check your inputs: {exc}")
+        st.stop()
 
 # --------------------------------------------------------------------------
 # Results
@@ -414,7 +483,12 @@ if st.session_state.scenarios:
 
     def _adj(values, r):
         """Deflate to real dollars if the toggle is on, else pass through nominal."""
-        return deflate_to_real(values, r["ages"], r["inflation_rate"]) if show_real else values
+        if not show_real:
+            return values
+        if "price_index" in r and values.ndim >= 2:
+            divisor = r["price_index"] if values.ndim == 2 else r["price_index"][:, :, None]
+            return values / divisor
+        return deflate_to_real(values, r["ages"], r["inflation_rate"])
 
     if selected:
         primary = selected[0]
@@ -444,7 +518,7 @@ if st.session_state.scenarios:
             xaxis_title="Age", yaxis_title=dollar_label,
             hovermode="x unified", height=500, legend=dict(orientation="h", y=1.08),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         if len(selected) > 1:
             fig2 = go.Figure()
@@ -457,7 +531,7 @@ if st.session_state.scenarios:
                 title="Scenario Comparison (Median Net Worth)",
                 xaxis_title="Age", yaxis_title=dollar_label, height=450,
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
             st.caption(
                 "Compare how small tweaks (a higher savings rate, a career change, a bigger emergency fund) "
                 "shift your median trajectory. Run additional scenarios above without clearing to keep building this comparison."
@@ -469,7 +543,37 @@ if st.session_state.scenarios:
         c2.metric("10th Percentile (Bad Luck)", f"${np.percentile(final_nw, 10):,.0f}")
         c3.metric("90th Percentile (Good Luck)", f"${np.percentile(final_nw, 90):,.0f}")
         prob_negative = (nw.min(axis=1) < 0).mean() * 100
-        c4.metric("Chance Net Worth Ever Goes Negative", f"{prob_negative:.1f}%")
+        c4.metric("Runs with Negative Net Worth", f"{prob_negative:.1f}%")
+
+        st.caption("Today contains no annual cash flow. Percentiles describe this model and its assumptions, not calibrated real-world probabilities.")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Runs needing new borrowing", f"{(res['new_borrowing'][:,1:].max(axis=1) > 0.01).mean()*100:.1f}%")
+        d2.metric("Median final non-mortgage debt", f"${np.median(_adj(res['debt'], res)[:,-1]):,.0f}")
+        d3.metric("Runs below cash target during plan", f"{(res['reserve_gap'][:,1:].max(axis=1) > 0.01).mean()*100:.1f}%")
+        measure_key = {"Liquid assets":"liquid_assets", "Net worth":"net_worth", "Cash reserve":"cash_reserve"}[res['goal_type']]
+        goal_values = res[measure_key][:,-1] / res['price_index'][:,-1]
+        st.metric(f"Model probability: {res['goal_type'].lower()} ≥ ${res['goal_amount']:,.0f} in today's dollars at age {ages[-1]}",
+                  f"{(goal_values >= res['goal_amount']).mean()*100:.1f}%")
+        checkpoints = []
+        for years in sorted(set([min(5,len(ages)-1), min(10,len(ages)-1), len(ages)-1])):
+            checkpoints.append({"Years ahead":years, "Age":ages[years],
+                "Median net worth":float(np.median(nw[:,years])),
+                "10th percentile net worth":float(np.percentile(nw[:,years],10)),
+                "Median liquid assets":float(np.median(_adj(res['liquid_assets'],res)[:,years])),
+                "Median cash":float(np.median(_adj(res['cash_reserve'],res)[:,years])),
+                "Median debt":float(np.median(_adj(res['debt'],res)[:,years]))})
+        st.subheader("5- and 10-year checkpoints")
+        st.dataframe(pd.DataFrame(checkpoints), hide_index=True, width="stretch")
+        st.caption("Liquid assets exclude home equity and retirement accounts; balances are before any tax due on sale. Cash targets use living expenses only, excluding separate property and debt costs.")
+        if "stress_result" in res:
+            stress = res['stress_result']
+            stress_fig = go.Figure()
+            for label, run in [("Baseline", res), ("First-year decline", stress)]:
+                stress_fig.add_trace(go.Scatter(x=run['ages'], y=np.median(_adj(run['net_worth'],run),axis=0), name=label))
+            stress_fig.update_layout(title="Sensitivity to a first-year market decline", xaxis_title="Age", yaxis_title=dollar_label)
+            st.plotly_chart(stress_fig, width="stretch")
+        st.download_button("Download scenario assumptions (JSON)", json.dumps(res['configuration'],indent=2),
+                           file_name="financial_plan_assumptions.json", mime="application/json")
 
         fig3 = go.Figure()
         fig3.add_trace(go.Histogram(x=final_nw, nbinsx=50, marker_color="rgb(99,110,250)"))
@@ -477,16 +581,17 @@ if st.session_state.scenarios:
             title=f"Distribution of Net Worth at Age {ages[-1]} — {primary}",
             xaxis_title=dollar_label, yaxis_title="Number of Simulations", height=400,
         )
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width="stretch")
 
         st.subheader("Asset Breakdown Over Time (Average Across Simulations)")
-        balances = _adj(res["balances"], res)  # deflate_to_real broadcasts over the last (age) axis
+        balances = _adj(res["balances"], res)
         mean_balances = balances.mean(axis=0)
         df_breakdown = pd.DataFrame(mean_balances, columns=res["asset_names"])
         if res.get("real_estate_names"):
             re_equity = _adj(res["real_estate_equity"], res).mean(axis=0)
             for i, name in enumerate(res["real_estate_names"]):
                 df_breakdown[f"{name} (equity)"] = re_equity[:, i]
+        df_breakdown["Non-mortgage debt (liability)"] = -_adj(res["debt"], res).mean(axis=0)
         df_breakdown.insert(0, "Age", ages)
 
         fig4 = go.Figure()
@@ -495,36 +600,33 @@ if st.session_state.scenarios:
         fig4.update_layout(
             title="Average Asset Balances Over Time", xaxis_title="Age", yaxis_title=dollar_label, height=450,
         )
-        st.plotly_chart(fig4, use_container_width=True)
+        st.plotly_chart(fig4, width="stretch")
 
         csv = df_breakdown.to_csv(index=False)
         st.download_button("📥 Download Asset Breakdown (CSV)", csv,
                             file_name=f"{primary.replace(' ', '_')}_breakdown.csv", mime="text/csv")
 
-        with st.expander("🧮 Cash Flow Detail (expected path, before investment-return randomness)"):
-            st.caption(
-                "Sanity-check your assumptions here: this shows the *expected* year-by-year cash flow — gross "
-                "income, after-tax income, recurring expenses (including any cost-of-living changes), and large "
-                "one-time expenses, and expected lost-income reserve — independent of investment-return randomness. "
-                "Income volatility is not reflected here since it varies per simulation; this is the average path "
-                "around which each simulation's income randomly fluctuates."
-            )
+        with st.expander("🧮 Cash Flow Detail (average simulated nominal dollars)"):
+            st.caption("Average actual simulated cash flows, including income shocks, unexpected bills and property costs. Values are nominal dollars even when the charts show today's dollars. The starting row contains no cash flow.")
             income_col = "Post-Tax Income Entered" if res.get("income_is_post_tax", False) else "Gross Income"
             cash_flow_df = pd.DataFrame({
-                "Age": res["ages"],
-                income_col: res["income_path"],
+                "Age": res["ages"], income_col: res["income_path"],
                 "After-Tax Income": res["after_tax_income_path"],
-                "Recurring Expenses": res["expense_path"],
-                "Large Expenses": res["large_expense_path"],
-                "Lost Income / Unplanned Spending": res.get("expected_lost_income_path", np.zeros(len(res["ages"]))),
+                "Living Expenses": res["expense_path"], "Large Expenses": res["large_expense_path"],
+                "Property Net Cash Flow": res["real_estate_cash_flow"].sum(axis=2).mean(axis=0),
+                "Property Purchase Cash": res["property_purchase_cash"].mean(axis=0),
+                "Unexpected Bills": res["emergency_expenses"].mean(axis=0),
+                "Lost Income / Unplanned Spending": res["expected_lost_income_path"],
+                "Debt Interest (added to debt)": res["debt_interest"].mean(axis=0),
+                "Debt Payments": res["debt_payments"].mean(axis=0),
+                "New Borrowing": res["new_borrowing"].mean(axis=0),
+                "Net Cash Flow Before Extra Debt Repayment / Saving": res["cash_flow"].mean(axis=0),
             })
-            cash_flow_df["Net Leftover for Saving/Investing"] = (
-                cash_flow_df["After-Tax Income"] - cash_flow_df["Recurring Expenses"]
-                - cash_flow_df["Large Expenses"] - cash_flow_df["Lost Income / Unplanned Spending"]
-            )
+            st.download_button("Download annual cash flow (nominal CSV)", cash_flow_df.to_csv(index=False),
+                               file_name="financial_plan_cash_flow.csv", mime="text/csv")
             st.dataframe(
                 cash_flow_df.style.format({c: "${:,.0f}" for c in cash_flow_df.columns if c != "Age"}),
-                use_container_width=True, height=300,
+                width="stretch", height=300,
             )
 
         with st.expander("ℹ️ How to read this"):
